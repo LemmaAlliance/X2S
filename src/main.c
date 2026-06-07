@@ -4,6 +4,7 @@
 #include <signal.h>
 #include <unistd.h>
 #include "obj_operations.h"
+#include "auth.h"
 #include "api_server.h"
 
 #define DEFAULT_PORT 8080
@@ -28,16 +29,40 @@ int main(int argc, char *argv[]) {
         return 1;
     }
 
-    ApiServer *api = api_server_start(port, store);
+    UserStore *users = user_store_create(8);
+    if (!users) {
+        fprintf(stderr, "Failed to create user store\n");
+        free_store(store);
+        return 1;
+    }
+
+    user_store_load(users, store->store_path);
+
+    SessionStore *sessions = session_store_create(16);
+    if (!sessions) {
+        fprintf(stderr, "Failed to create session store\n");
+        user_store_free(users);
+        free_store(store);
+        return 1;
+    }
+
+    TokenStore tokens = { .users = users, .sessions = sessions };
+
+    ApiServer *api = api_server_start(port, store, &tokens);
     if (!api) {
         fprintf(stderr, "Failed to start API server on port %u\n", port);
+        session_store_free(sessions);
+        user_store_free(users);
         free_store(store);
         return 1;
     }
 
     printf("Listening on http://0.0.0.0:%u\n", port);
-    printf("  PUT    /objects            upload an object\n");
-    printf("  GET    /objects/<id>       retrieve an object\n");
+    printf("  POST  /auth/register      register a new user\n");
+    printf("  POST  /auth/login          authenticate and get a token\n");
+    printf("  POST  /auth/logout         invalidate a token\n");
+    printf("  PUT   /objects             upload an object\n");
+    printf("  GET   /objects/<id>        retrieve an object\n");
     printf("  DELETE /objects/<id>       remove an object\n");
     printf("Press Ctrl-C to stop.\n\n");
 
@@ -46,6 +71,9 @@ int main(int argc, char *argv[]) {
 
     printf("\nShutting down...\n");
     api_server_stop(api);
+    user_store_save(users, store->store_path);
+    session_store_free(sessions);
+    user_store_free(users);
     free_store(store);
     return 0;
 }

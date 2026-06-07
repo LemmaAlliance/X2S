@@ -15,6 +15,7 @@ add_executable(x2s
     src/main.c
     src/obj_operations.c
     src/api_server.c
+    src/auth.c
 )
 
 target_include_directories(x2s PRIVATE

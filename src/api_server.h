@@ -2,6 +2,7 @@
 #define API_SERVER_H
 
 #include "obj_structs.h"
+#include "auth.h"
 
 /*
  * api_server.h — HTTP REST layer for X2S
@@ -24,6 +25,23 @@
  *   DELETE /objects/<hex-id>     Remove an object from the store.
  *                                Returns 204 No Content on success.
  *
+ *   POST   /auth/register        Register a new user.
+ *                                Body: username=<user>&password=<pass>
+ *                                Returns 201 with {"token":"<64hex>","user_id":"<32hex>"}
+ *
+ *   POST   /auth/login           Authenticate and get a bearer token.
+ *                                Body: username=<user>&password=<pass>
+ *                                Returns 200 with {"token":"<64hex>","user_id":"<32hex>"}
+ *
+ *   POST   /auth/logout          Invalidate a bearer token.
+ *                                Header: Authorization: Bearer <token>
+ *                                Returns 204 No Content.
+ *
+ * Authentication:
+ *   Existing object endpoints now also accept:
+ *     Authorization: Bearer <64-hex-char-token>
+ *   as an alternative to X-User-Id / X-Username headers.
+ *
  * All error responses carry a JSON body: {"error":"<message>"}
  */
 
@@ -31,12 +49,13 @@ typedef struct ApiServer ApiServer;
 
 /*
  * Create and start the HTTP server on the given port.
- * The server takes a reference to an existing ObjectStore; it does not
- * own the store and will not free it.
+ * The server takes references to an existing ObjectStore, UserStore, and
+ * SessionStore; it does not own them and will not free them.
  *
  * Returns NULL on failure (port in use, memory error, etc.).
  */
-ApiServer *api_server_start(unsigned int port, ObjectStore *store);
+ApiServer *api_server_start(unsigned int port, ObjectStore *store,
+                            TokenStore *tokens);
 
 /*
  * Stop the server and free all resources. Blocks until the internal

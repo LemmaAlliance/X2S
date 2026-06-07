@@ -6,6 +6,7 @@
 #include <microhttpd.h>
 #include "obj_structs.h"
 #include "obj_operations.h"
+#include "auth.h"
 #include "api_server.h"
 
 /* -------------------------------------------------------------------------
@@ -15,6 +16,7 @@
 struct ApiServer {
     struct MHD_Daemon *daemon;
     ObjectStore       *store;
+    TokenStore        *tokens;
 };
 
 /*
@@ -125,6 +127,70 @@ static int parse_hex_id(const char *hex, unsigned char out[32]) {
     return 1;
 }
 
+/*
+ * Parse a value from URL-encoded form data.
+ * Returns 1 if the field was found and copied, 0 otherwise.
+ */
+static int parse_form_field(const char *body, const char *field,
+                            char *out, size_t out_size) {
+    if (!body || !field || !out || out_size == 0) return 0;
+    out[0] = '\0';
+
+    size_t field_len = strlen(field);
+    const char *start = body;
+
+    while ((start = strstr(start, field)) != NULL) {
+        if (start == body || start[-1] == '&') {
+            start += field_len;
+            if (*start == '=') {
+                start++;
+                size_t val_len = 0;
+                while (start[val_len] && start[val_len] != '&')
+                    val_len++;
+                size_t copy = (val_len < out_size - 1) ? val_len : out_size - 1;
+                memcpy(out, start, copy);
+                out[copy] = '\0';
+                return 1;
+            }
+        }
+        start++;
+    }
+
+    return 0;
+}
+
+/*
+ * Extract a User identity from request headers or bearer token.
+ * Falls back to a zeroed-out anonymous user when no headers are present.
+ *   Authorization: Bearer <64-hex-char-token>
+ *   X-User-Id: 32 hex chars → 16-byte user_id
+ *   X-Username: plain text name (max 63 chars)
+ */
+static void get_user_from_request(struct MHD_Connection *conn, User *user,
+                                  TokenStore *tokens) {
+    memset(user, 0, sizeof(User));
+    strcpy(user->username, "anonymous");
+
+    const char *auth = MHD_lookup_connection_value(conn, MHD_HEADER_KIND,
+                                                    "Authorization");
+    if (auth && strncmp(auth, "Bearer ", 7) == 0 && tokens) {
+        const char *hex_token = auth + 7;
+        if (strlen(hex_token) == TOKEN_SIZE * 2) {
+            unsigned char token_bin[TOKEN_SIZE];
+            if (hex_to_bytes(hex_token, token_bin, TOKEN_SIZE)) {
+                unsigned char uid[16];
+                if (session_lookup(tokens->sessions, token_bin, uid)) {
+                    memcpy(user->user_id, uid, 16);
+                    user_store_get_username(tokens->users, uid,
+                                            user->username,
+                                            sizeof(user->username));
+                    return;
+                }
+            }
+        }
+    }
+}
+
 /* -------------------------------------------------------------------------
  * Route handlers
  * ---------------------------------------------------------------------- */
@@ -199,7 +265,10 @@ static enum MHD_Result handle_put(struct MHD_Connection *conn,
     obj.size     = ub->len;
     obj.metadata = (category || extension || filename) ? &meta : NULL;
 
-    if (!put_object(server->store, &obj))
+    User user;
+    get_user_from_request(conn, &user, server->tokens);
+
+    if (!put_object(server->store, &user, &obj))
         return send_error(conn, MHD_HTTP_INTERNAL_SERVER_ERROR,
                           "failed to store object");
 
@@ -239,7 +308,17 @@ static enum MHD_Result handle_get(struct MHD_Connection *conn,
     if (!parse_hex_id(hex_id, id))
         return send_error(conn, MHD_HTTP_BAD_REQUEST, "invalid object id");
 
-    Object *obj = get_object(server->store, id);
+    User user;
+    get_user_from_request(conn, &user, server->tokens);
+
+    int perm = check_object_permission(server->store, id,
+                                        user.user_id, PERM_READ);
+    if (perm == -1)
+        return send_error(conn, MHD_HTTP_NOT_FOUND, "object not found");
+    if (perm == 0)
+        return send_error(conn, MHD_HTTP_FORBIDDEN, "access denied");
+
+    Object *obj = get_object(server->store, &user, id);
     if (!obj)
         return send_error(conn, MHD_HTTP_NOT_FOUND, "object not found");
 
@@ -249,6 +328,10 @@ static enum MHD_Result handle_get(struct MHD_Connection *conn,
                                         MHD_RESPMEM_MUST_FREE);
     if (!resp) {
         free(obj->data);
+        if (obj->acl) {
+            free(obj->acl->entries);
+            free(obj->acl);
+        }
         free_metadata(obj->metadata);
         free(obj);
         return MHD_NO;
@@ -259,6 +342,10 @@ static enum MHD_Result handle_get(struct MHD_Connection *conn,
         obj->metadata ? obj->metadata->extension : NULL);
     MHD_add_response_header(resp, "Content-Type", mime);
 
+    if (obj->acl) {
+        free(obj->acl->entries);
+        free(obj->acl);
+    }
     free_metadata(obj->metadata);
     free(obj);   /* data already handed off; do NOT free(obj->data) here */
 
@@ -277,10 +364,234 @@ static enum MHD_Result handle_delete(struct MHD_Connection *conn,
     if (!parse_hex_id(hex_id, id))
         return send_error(conn, MHD_HTTP_BAD_REQUEST, "invalid object id");
 
-    if (!remove_object(server->store, id))
+    User user;
+    get_user_from_request(conn, &user, server->tokens);
+
+    int perm = check_object_permission(server->store, id,
+                                        user.user_id, PERM_DELETE);
+    if (perm == -1)
+        return send_error(conn, MHD_HTTP_NOT_FOUND, "object not found");
+    if (perm == 0)
+        return send_error(conn, MHD_HTTP_FORBIDDEN, "access denied");
+
+    if (!remove_object(server->store, &user, id))
         return send_error(conn, MHD_HTTP_NOT_FOUND, "object not found");
 
     /* 204 No Content — no body */
+    struct MHD_Response *resp =
+        MHD_create_response_from_buffer(0, NULL, MHD_RESPMEM_PERSISTENT);
+    if (!resp) return MHD_NO;
+
+    enum MHD_Result ret = MHD_queue_response(conn, MHD_HTTP_NO_CONTENT, resp);
+    MHD_destroy_response(resp);
+    return ret;
+}
+
+/* -------------------------------------------------------------------------
+ * Auth route handlers
+ * ---------------------------------------------------------------------- */
+
+/*
+ * Common handler for POST /auth/register and POST /auth/login.
+ * Follows the same body-accumulation pattern as handle_put.
+ */
+static enum MHD_Result handle_auth_register(struct MHD_Connection *conn,
+                                            ApiServer *server,
+                                            const char *upload_data,
+                                            size_t *upload_data_size,
+                                            void **con_cls) {
+    if (!*con_cls) {
+        UploadBuffer *ub = calloc(1, sizeof(UploadBuffer));
+        if (!ub) return MHD_NO;
+        *con_cls = ub;
+        return MHD_YES;
+    }
+
+    UploadBuffer *ub = *con_cls;
+
+    if (*upload_data_size > 0) {
+        size_t incoming = *upload_data_size;
+        if (ub->len + incoming > 4096)
+            return send_error(conn, MHD_HTTP_BAD_REQUEST, "body too large");
+
+        if (ub->len + incoming > ub->cap) {
+            size_t new_cap = (ub->cap == 0) ? incoming : ub->cap;
+            while (new_cap < ub->len + incoming) new_cap *= 2;
+            char *tmp = realloc(ub->buf, new_cap);
+            if (!tmp) return MHD_NO;
+            ub->buf = tmp;
+            ub->cap = new_cap;
+        }
+
+        memcpy(ub->buf + ub->len, upload_data, incoming);
+        ub->len += incoming;
+        *upload_data_size = 0;
+        return MHD_YES;
+    }
+
+    if (ub->len == 0)
+        return send_error(conn, MHD_HTTP_BAD_REQUEST, "empty body");
+
+    char username[64] = {0};
+    char password[256] = {0};
+
+    if (!parse_form_field(ub->buf, "username", username, sizeof(username)) ||
+        !parse_form_field(ub->buf, "password", password, sizeof(password)))
+        return send_error(conn, MHD_HTTP_BAD_REQUEST,
+                          "missing username or password");
+
+    if (strlen(username) == 0 || strlen(password) == 0)
+        return send_error(conn, MHD_HTTP_BAD_REQUEST,
+                          "username and password required");
+
+    unsigned char user_id[16];
+    if (!user_store_register(server->tokens->users, username, password, user_id))
+        return send_error(conn, MHD_HTTP_CONFLICT,
+                          "username already taken or invalid");
+
+    char *token_hex = session_create(server->tokens->sessions, user_id);
+    if (!token_hex)
+        return send_error(conn, MHD_HTTP_INTERNAL_SERVER_ERROR,
+                          "failed to create session");
+
+    if (!user_store_save(server->tokens->users,
+                         server->store->store_path)) {
+        free(token_hex);
+        return send_error(conn, MHD_HTTP_INTERNAL_SERVER_ERROR,
+                          "failed to persist users");
+    }
+
+    char user_id_hex[33] = {0};
+    bytes_to_hex(user_id, 16, user_id_hex);
+
+    size_t json_len = strlen(token_hex) + strlen(user_id_hex) + 40;
+    char *json = malloc(json_len + 1);
+    if (!json) {
+        free(token_hex);
+        return MHD_NO;
+    }
+
+    snprintf(json, json_len + 1,
+             "{\"token\":\"%s\",\"user_id\":\"%s\"}",
+             token_hex, user_id_hex);
+    free(token_hex);
+
+    struct MHD_Response *resp =
+        MHD_create_response_from_buffer(strlen(json), json,
+                                        MHD_RESPMEM_MUST_FREE);
+    if (!resp) {
+        free(json);
+        return MHD_NO;
+    }
+
+    MHD_add_response_header(resp, "Content-Type", "application/json");
+    enum MHD_Result ret = MHD_queue_response(conn, MHD_HTTP_CREATED, resp);
+    MHD_destroy_response(resp);
+    return ret;
+}
+
+static enum MHD_Result handle_auth_login(struct MHD_Connection *conn,
+                                         ApiServer *server,
+                                         const char *upload_data,
+                                         size_t *upload_data_size,
+                                         void **con_cls) {
+    if (!*con_cls) {
+        UploadBuffer *ub = calloc(1, sizeof(UploadBuffer));
+        if (!ub) return MHD_NO;
+        *con_cls = ub;
+        return MHD_YES;
+    }
+
+    UploadBuffer *ub = *con_cls;
+
+    if (*upload_data_size > 0) {
+        size_t incoming = *upload_data_size;
+        if (ub->len + incoming > 4096)
+            return send_error(conn, MHD_HTTP_BAD_REQUEST, "body too large");
+
+        if (ub->len + incoming > ub->cap) {
+            size_t new_cap = (ub->cap == 0) ? incoming : ub->cap;
+            while (new_cap < ub->len + incoming) new_cap *= 2;
+            char *tmp = realloc(ub->buf, new_cap);
+            if (!tmp) return MHD_NO;
+            ub->buf = tmp;
+            ub->cap = new_cap;
+        }
+
+        memcpy(ub->buf + ub->len, upload_data, incoming);
+        ub->len += incoming;
+        *upload_data_size = 0;
+        return MHD_YES;
+    }
+
+    if (ub->len == 0)
+        return send_error(conn, MHD_HTTP_BAD_REQUEST, "empty body");
+
+    char username[64] = {0};
+    char password[256] = {0};
+
+    if (!parse_form_field(ub->buf, "username", username, sizeof(username)) ||
+        !parse_form_field(ub->buf, "password", password, sizeof(password)))
+        return send_error(conn, MHD_HTTP_BAD_REQUEST,
+                          "missing username or password");
+
+    unsigned char user_id[16];
+    if (!user_store_authenticate(server->tokens->users, username, password,
+                                 user_id))
+        return send_error(conn, MHD_HTTP_UNAUTHORIZED,
+                          "invalid username or password");
+
+    char *token_hex = session_create(server->tokens->sessions, user_id);
+    if (!token_hex)
+        return send_error(conn, MHD_HTTP_INTERNAL_SERVER_ERROR,
+                          "failed to create session");
+
+    char user_id_hex[33] = {0};
+    bytes_to_hex(user_id, 16, user_id_hex);
+
+    size_t json_len = strlen(token_hex) + strlen(user_id_hex) + 40;
+    char *json = malloc(json_len + 1);
+    if (!json) {
+        free(token_hex);
+        return MHD_NO;
+    }
+
+    snprintf(json, json_len + 1,
+             "{\"token\":\"%s\",\"user_id\":\"%s\"}",
+             token_hex, user_id_hex);
+    free(token_hex);
+
+    struct MHD_Response *resp =
+        MHD_create_response_from_buffer(strlen(json), json,
+                                        MHD_RESPMEM_MUST_FREE);
+    if (!resp) {
+        free(json);
+        return MHD_NO;
+    }
+
+    MHD_add_response_header(resp, "Content-Type", "application/json");
+    enum MHD_Result ret = MHD_queue_response(conn, MHD_HTTP_OK, resp);
+    MHD_destroy_response(resp);
+    return ret;
+}
+
+static enum MHD_Result handle_auth_logout(struct MHD_Connection *conn,
+                                          ApiServer *server) {
+    const char *auth = MHD_lookup_connection_value(conn, MHD_HEADER_KIND,
+                                                    "Authorization");
+    if (!auth || strncmp(auth, "Bearer ", 7) != 0)
+        return send_error(conn, MHD_HTTP_UNAUTHORIZED, "missing bearer token");
+
+    const char *hex_token = auth + 7;
+    if (strlen(hex_token) != TOKEN_SIZE * 2)
+        return send_error(conn, MHD_HTTP_UNAUTHORIZED, "invalid token");
+
+    unsigned char token_bin[TOKEN_SIZE];
+    if (!hex_to_bytes(hex_token, token_bin, TOKEN_SIZE))
+        return send_error(conn, MHD_HTTP_UNAUTHORIZED, "invalid token");
+
+    session_destroy(server->tokens->sessions, token_bin);
+
     struct MHD_Response *resp =
         MHD_create_response_from_buffer(0, NULL, MHD_RESPMEM_PERSISTENT);
     if (!resp) return MHD_NO;
@@ -307,9 +618,35 @@ static enum MHD_Result access_handler(void *cls,
     ApiServer *server = cls;
 
     /*
-     * Route: /objects          → PUT only
+     * Route: /auth/register   → POST only
+     *        /auth/login      → POST only
+     *        /auth/logout     → POST only
+     *        /objects          → PUT only
      *        /objects/<hex-id> → GET or DELETE
      */
+    if (strcmp(url, "/auth/register") == 0) {
+        if (strcmp(method, "POST") == 0)
+            return handle_auth_register(conn, server, upload_data,
+                                        upload_data_size, con_cls);
+        return send_error(conn, MHD_HTTP_METHOD_NOT_ALLOWED,
+                          "only POST is accepted on /auth/register");
+    }
+
+    if (strcmp(url, "/auth/login") == 0) {
+        if (strcmp(method, "POST") == 0)
+            return handle_auth_login(conn, server, upload_data,
+                                     upload_data_size, con_cls);
+        return send_error(conn, MHD_HTTP_METHOD_NOT_ALLOWED,
+                          "only POST is accepted on /auth/login");
+    }
+
+    if (strcmp(url, "/auth/logout") == 0) {
+        if (strcmp(method, "POST") == 0)
+            return handle_auth_logout(conn, server);
+        return send_error(conn, MHD_HTTP_METHOD_NOT_ALLOWED,
+                          "only POST is accepted on /auth/logout");
+    }
+
     if (strcmp(url, "/objects") == 0) {
         if (strcmp(method, "PUT") == 0)
             return handle_put(conn, server, upload_data,
@@ -322,7 +659,7 @@ static enum MHD_Result access_handler(void *cls,
     if (strncmp(url, "/objects/", 9) == 0) {
         const char *hex_id = url + 9;
 
-        /* Initialise con_cls for the first call on non-PUT routes */
+        /* Initialise con_cls for the first call on non-POST/non-PUT routes */
         if (!*con_cls) {
             *con_cls = (void *)1; /* sentinel — no buffer needed */
             return MHD_YES;
@@ -355,8 +692,8 @@ static void request_completed(void *cls,
     if (!con_cls || !*con_cls) return;
 
     /*
-     * Only PUT requests allocate a real UploadBuffer. GET/DELETE use the
-     * sentinel value 1 — detect by checking pointer plausibility.
+     * Only PUT and POST auth requests allocate a real UploadBuffer.
+     * GET/DELETE/logout use the sentinel value 1.
      */
     if (*con_cls == (void *)1) {
         *con_cls = NULL;
@@ -373,13 +710,15 @@ static void request_completed(void *cls,
  * Public API
  * ---------------------------------------------------------------------- */
 
-ApiServer *api_server_start(unsigned int port, ObjectStore *store) {
+ApiServer *api_server_start(unsigned int port, ObjectStore *store,
+                            TokenStore *tokens) {
     if (!store) return NULL;
 
     ApiServer *server = malloc(sizeof(ApiServer));
     if (!server) return NULL;
 
     server->store = store;
+    server->tokens = tokens;
 
     /*
      * MHD_USE_INTERNAL_POLLING_THREAD: MHD manages its own thread so
