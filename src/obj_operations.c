@@ -6,6 +6,8 @@
 #include <openssl/evp.h>
 #include "obj_structs.h"
 
+#define PATH_MAX_LEN 4096
+
 /* Metadata helpers */
 
 void free_metadata(Metadata *metadata) {
@@ -80,6 +82,75 @@ static size_t hash_id(const unsigned char id[32]) {
 
 static size_t index_for(ObjectStore *store, const unsigned char id[32]) {
     return hash_id(id) % store->capacity;
+}
+
+static int load_index(ObjectStore *store) {
+    char index_path[PATH_MAX_LEN + 16];
+    snprintf(index_path, sizeof(index_path),
+             "%s/__index", store->store_path);
+
+    FILE *f = fopen(index_path, "rb");
+    if (!f) return 0; // first run, no index yet
+
+    size_t capacity = 0;
+    size_t count = 0;
+
+    if (fread(&capacity, sizeof(size_t), 1, f) != 1 ||
+        fread(&count, sizeof(size_t), 1, f) != 1) {
+        fclose(f);
+        return 0;
+    }
+
+    // If stored capacity differs, adjust store BEFORE inserting
+    if (capacity != store->capacity) {
+        ObjectNode **new_buckets =
+            calloc(capacity, sizeof(ObjectNode *));
+        if (!new_buckets) {
+            fclose(f);
+            return 0;
+        }
+
+        free(store->buckets);
+        store->buckets = new_buckets;
+        store->capacity = capacity;
+    }
+
+    store->count = 0; // we'll recompute safely
+
+    for (size_t i = 0; i < count; i++) {
+        unsigned char id[32];
+
+        if (fread(id, 1, 32, f) != 32) {
+            fclose(f);
+            return 0;
+        }
+
+        Object *index_obj = calloc(1, sizeof(Object));
+        if (!index_obj) {
+            fclose(f);
+            return 0;
+        }
+
+        memcpy(index_obj->id, id, 32);
+
+        ObjectNode *node = malloc(sizeof(ObjectNode));
+        if (!node) {
+            free(index_obj);
+            fclose(f);
+            return 0;
+        }
+
+        size_t index = index_for(store, id);
+
+        node->obj = index_obj;
+        node->next = store->buckets[index];
+        store->buckets[index] = node;
+
+        store->count++;
+    }
+
+    fclose(f);
+    return 1;
 }
 
 /* Convert 32-byte binary ID to 64-char hex string (+ null terminator) */
@@ -237,11 +308,7 @@ ObjectStore *create_store(size_t initial_capacity, const char *path) {
 
     snprintf(store->store_path, sizeof(store->store_path), "%s", path);
 
-    /* Create the storage directory if it doesn't already exist.
-     * EEXIST is fine — the directory is already there. Any other
-     * error means we cannot write objects, so fail early. */
     if (mkdir(store->store_path, 0755) != 0 && errno != EEXIST) {
-        free(store->buckets);
         free(store);
         return NULL;
     }
@@ -251,6 +318,9 @@ ObjectStore *create_store(size_t initial_capacity, const char *path) {
         free(store);
         return NULL;
     }
+
+    // Try to restore previous index (if it exists)
+    load_index(store);
 
     return store;
 }
@@ -311,25 +381,36 @@ static int resize_store(ObjectStore *store) {
  * Written atomically via a temp file + rename. */
 
 static int write_index(ObjectStore *store) {
-    /* Build a temp path beside the index file */
     char index_path[4096 + 16];
     char tmp_path[4096 + 32];
-    snprintf(index_path, sizeof(index_path), "%s/__index", store->store_path);
-    snprintf(tmp_path,   sizeof(tmp_path),   "%s/__index.tmp", store->store_path);
+
+    snprintf(index_path, sizeof(index_path),
+             "%s/__index", store->store_path);
+
+    snprintf(tmp_path, sizeof(tmp_path),
+             "%s/__index.tmp", store->store_path);
 
     FILE *f = fopen(tmp_path, "wb");
     if (!f) return 0;
 
-    /* Write count first */
+    // Write capacity first (NEW)
+    if (fwrite(&store->capacity, sizeof(size_t), 1, f) != 1) {
+        fclose(f);
+        remove(tmp_path);
+        return 0;
+    }
+
+    // Then count
     if (fwrite(&store->count, sizeof(size_t), 1, f) != 1) {
         fclose(f);
         remove(tmp_path);
         return 0;
     }
 
-    /* Walk every bucket and write each object's 32-byte ID */
+    // Write all IDs
     for (size_t i = 0; i < store->capacity; i++) {
         ObjectNode *node = store->buckets[i];
+
         while (node) {
             if (fwrite(node->obj->id, 32, 1, f) != 1) {
                 fclose(f);
@@ -342,7 +423,6 @@ static int write_index(ObjectStore *store) {
 
     fclose(f);
 
-    /* Atomic rename so readers never see a partial file */
     if (rename(tmp_path, index_path) != 0) {
         remove(tmp_path);
         return 0;
