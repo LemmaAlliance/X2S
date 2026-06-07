@@ -1,0 +1,473 @@
+#include <stdlib.h>
+#include <string.h>
+#include <stdio.h>
+#include <errno.h>
+#include <sys/stat.h>
+#include <openssl/evp.h>
+#include "obj_structs.h"
+
+/* Metadata helpers */
+
+void free_metadata(Metadata *metadata) {
+    if (!metadata) return;
+    free(metadata->category);
+    free(metadata->extension);
+    free(metadata->filename);
+    free(metadata);
+}
+
+/* SHA-256 object hashing */
+
+static int compute_object_id(Object *obj, unsigned char out[32]) {
+    EVP_MD_CTX *ctx = EVP_MD_CTX_new();
+    if (!ctx) return 0;
+
+    if (!EVP_DigestInit_ex(ctx, EVP_sha256(), NULL)) {
+        EVP_MD_CTX_free(ctx);
+        return 0;
+    }
+
+    if (obj->data && obj->size > 0) {
+        if (!EVP_DigestUpdate(ctx, obj->data, obj->size)) {
+            EVP_MD_CTX_free(ctx);
+            return 0;
+        }
+    }
+
+    if (obj->metadata) {
+        if (obj->metadata->category &&
+            !EVP_DigestUpdate(ctx, obj->metadata->category,
+                              strlen(obj->metadata->category))) {
+            EVP_MD_CTX_free(ctx);
+            return 0;
+        }
+        if (obj->metadata->extension &&
+            !EVP_DigestUpdate(ctx, obj->metadata->extension,
+                              strlen(obj->metadata->extension))) {
+            EVP_MD_CTX_free(ctx);
+            return 0;
+        }
+        if (obj->metadata->filename &&
+            !EVP_DigestUpdate(ctx, obj->metadata->filename,
+                              strlen(obj->metadata->filename))) {
+            EVP_MD_CTX_free(ctx);
+            return 0;
+        }
+    }
+
+    unsigned int len = 32;
+    if (!EVP_DigestFinal_ex(ctx, out, &len)) {
+        EVP_MD_CTX_free(ctx);
+        return 0;
+    }
+
+    EVP_MD_CTX_free(ctx);
+    return 1;
+}
+
+/* Hash table hashing (reduce SHA-256 -> index) */
+
+static size_t hash_id(const unsigned char id[32]) {
+    size_t h = 1469598103934665603ULL; // FNV offset basis
+
+    for (int i = 0; i < 32; i++) {
+        h ^= id[i];
+        h *= 1099511628211ULL;
+    }
+
+    return h;
+}
+
+static size_t index_for(ObjectStore *store, const unsigned char id[32]) {
+    return hash_id(id) % store->capacity;
+}
+
+/* Convert 32-byte binary ID to 64-char hex string (+ null terminator) */
+
+static void id_to_hex(const unsigned char id[32], char out[65]) {
+    for (int i = 0; i < 32; i++) {
+        snprintf(out + i * 2, 3, "%02x", id[i]);
+    }
+    out[64] = '\0';
+}
+
+/* Build the full path for an object file: <store_path>/<hex_id> */
+
+static void object_path(ObjectStore *store, const unsigned char id[32],
+                        char *out, size_t out_len) {
+    char hex[65];
+    id_to_hex(id, hex);
+    snprintf(out, out_len, "%s/%s", store->store_path, hex);
+}
+
+/* Disk I/O
+ *
+ * File layout (binary):
+ *   [size_t data_len]
+ *   [size_t category_len]  (excludes null terminator)
+ *   [size_t extension_len]
+ *   [size_t filename_len]
+ *   [uint8_t data[data_len]]
+ *   [char category[category_len]]
+ *   [char extension[extension_len]]
+ *   [char filename[filename_len]]
+ */
+
+static int write_object_file(ObjectStore *store, Object *obj) {
+    char path[512];
+    object_path(store, obj->id, path, sizeof(path));
+
+    FILE *f = fopen(path, "wb");
+    if (!f) return 0;
+
+    size_t category_len  = (obj->metadata && obj->metadata->category)
+                           ? strlen(obj->metadata->category)  : 0;
+    size_t extension_len = (obj->metadata && obj->metadata->extension)
+                           ? strlen(obj->metadata->extension) : 0;
+    size_t filename_len  = (obj->metadata && obj->metadata->filename)
+                           ? strlen(obj->metadata->filename)  : 0;
+
+    int ok =
+        fwrite(&obj->size,     sizeof(size_t), 1, f) == 1 &&
+        fwrite(&category_len,  sizeof(size_t), 1, f) == 1 &&
+        fwrite(&extension_len, sizeof(size_t), 1, f) == 1 &&
+        fwrite(&filename_len,  sizeof(size_t), 1, f) == 1 &&
+        (obj->size == 0      || fwrite(obj->data,                    1, obj->size,     f) == obj->size)     &&
+        (category_len == 0   || fwrite(obj->metadata->category,      1, category_len,  f) == category_len)  &&
+        (extension_len == 0  || fwrite(obj->metadata->extension,     1, extension_len, f) == extension_len) &&
+        (filename_len == 0   || fwrite(obj->metadata->filename,      1, filename_len,  f) == filename_len);
+
+    fclose(f);
+    return ok;
+}
+
+/* Read a length-prefixed string field from a file into a heap-allocated buffer */
+
+static char *read_string_field(FILE *f, size_t len) {
+    if (len == 0) return NULL;
+
+    char *buf = malloc(len + 1);
+    if (!buf) return NULL;
+
+    if (fread(buf, 1, len, f) != len) {
+        free(buf);
+        return NULL;
+    }
+
+    buf[len] = '\0';
+    return buf;
+}
+
+static int read_object_file(ObjectStore *store, const unsigned char id[32],
+                            Object *out) {
+    char path[512];
+    object_path(store, id, path, sizeof(path));
+
+    FILE *f = fopen(path, "rb");
+    if (!f) return 0;
+
+    size_t data_len = 0, category_len = 0, extension_len = 0, filename_len = 0;
+
+    if (fread(&data_len,      sizeof(size_t), 1, f) != 1 ||
+        fread(&category_len,  sizeof(size_t), 1, f) != 1 ||
+        fread(&extension_len, sizeof(size_t), 1, f) != 1 ||
+        fread(&filename_len,  sizeof(size_t), 1, f) != 1) {
+        fclose(f);
+        return 0;
+    }
+
+    void *data = NULL;
+
+    if (data_len > 0) {
+        data = malloc(data_len);
+        if (!data || fread(data, 1, data_len, f) != data_len) {
+            free(data);
+            fclose(f);
+            return 0;
+        }
+    }
+
+    Metadata *metadata = calloc(1, sizeof(Metadata));
+    if (!metadata) {
+        free(data);
+        fclose(f);
+        return 0;
+    }
+
+    metadata->category  = read_string_field(f, category_len);
+    metadata->extension = read_string_field(f, extension_len);
+    metadata->filename  = read_string_field(f, filename_len);
+
+    /* Partial read on any field means the file is corrupt */
+    if ((category_len  && !metadata->category)  ||
+        (extension_len && !metadata->extension) ||
+        (filename_len  && !metadata->filename)) {
+        free(data);
+        free_metadata(metadata);
+        fclose(f);
+        return 0;
+    }
+
+    fclose(f);
+
+    memcpy(out->id, id, 32);
+    out->size     = data_len;
+    out->data     = data;
+    out->metadata = metadata;
+
+    return 1;
+}
+
+static void delete_object_file(ObjectStore *store, const unsigned char id[32]) {
+    char path[512];
+    object_path(store, id, path, sizeof(path));
+    remove(path);
+}
+
+/* Create store */
+
+ObjectStore *create_store(size_t initial_capacity, const char *path) {
+    if (!path) return NULL;
+
+    ObjectStore *store = malloc(sizeof(ObjectStore));
+    if (!store) return NULL;
+
+    store->capacity = (initial_capacity < 8) ? 8 : initial_capacity;
+    store->count = 0;
+
+    snprintf(store->store_path, sizeof(store->store_path), "%s", path);
+
+    /* Create the storage directory if it doesn't already exist.
+     * EEXIST is fine — the directory is already there. Any other
+     * error means we cannot write objects, so fail early. */
+    if (mkdir(store->store_path, 0755) != 0 && errno != EEXIST) {
+        free(store->buckets);
+        free(store);
+        return NULL;
+    }
+
+    store->buckets = calloc(store->capacity, sizeof(ObjectNode *));
+    if (!store->buckets) {
+        free(store);
+        return NULL;
+    }
+
+    return store;
+}
+
+/* Free store (in-memory structures only; files persist on disk) */
+
+void free_store(ObjectStore *store) {
+    if (!store) return;
+
+    for (size_t i = 0; i < store->capacity; i++) {
+        ObjectNode *node = store->buckets[i];
+
+        while (node) {
+            ObjectNode *next = node->next;
+            free(node->obj->data);
+            free_metadata(node->obj->metadata);
+            free(node->obj);
+            free(node);
+            node = next;
+        }
+    }
+
+    free(store->buckets);
+    free(store);
+}
+
+/* Resize + rehash */
+
+static int resize_store(ObjectStore *store) {
+    size_t new_capacity = store->capacity * 2;
+
+    ObjectNode **new_buckets = calloc(new_capacity, sizeof(ObjectNode *));
+    if (!new_buckets) return 0;
+
+    for (size_t i = 0; i < store->capacity; i++) {
+        ObjectNode *node = store->buckets[i];
+
+        while (node) {
+            ObjectNode *next = node->next;
+
+            size_t new_index = hash_id(node->obj->id) % new_capacity;
+            node->next = new_buckets[new_index];
+            new_buckets[new_index] = node;
+
+            node = next;
+        }
+    }
+
+    free(store->buckets);
+    store->buckets = new_buckets;
+    store->capacity = new_capacity;
+
+    return 1;
+}
+
+/* Persist the in-memory index to disk as a simple binary file.
+ * Format: [size_t count] then count × 32-byte IDs.
+ * Written atomically via a temp file + rename. */
+
+static int write_index(ObjectStore *store) {
+    /* Build a temp path beside the index file */
+    char index_path[4096 + 16];
+    char tmp_path[4096 + 32];
+    snprintf(index_path, sizeof(index_path), "%s/__index", store->store_path);
+    snprintf(tmp_path,   sizeof(tmp_path),   "%s/__index.tmp", store->store_path);
+
+    FILE *f = fopen(tmp_path, "wb");
+    if (!f) return 0;
+
+    /* Write count first */
+    if (fwrite(&store->count, sizeof(size_t), 1, f) != 1) {
+        fclose(f);
+        remove(tmp_path);
+        return 0;
+    }
+
+    /* Walk every bucket and write each object's 32-byte ID */
+    for (size_t i = 0; i < store->capacity; i++) {
+        ObjectNode *node = store->buckets[i];
+        while (node) {
+            if (fwrite(node->obj->id, 32, 1, f) != 1) {
+                fclose(f);
+                remove(tmp_path);
+                return 0;
+            }
+            node = node->next;
+        }
+    }
+
+    fclose(f);
+
+    /* Atomic rename so readers never see a partial file */
+    if (rename(tmp_path, index_path) != 0) {
+        remove(tmp_path);
+        return 0;
+    }
+
+    return 1;
+}
+
+/* Insert — writes data to disk, stores a lightweight index entry in memory */
+
+int put_object(ObjectStore *store, Object *obj) {
+    if (!store || !obj) return 0;
+
+    if (!compute_object_id(obj, obj->id)) return 0;
+
+    /* Duplicate check before any allocation or resize */
+    size_t index = index_for(store, obj->id);
+    ObjectNode *existing = store->buckets[index];
+    while (existing) {
+        if (memcmp(existing->obj->id, obj->id, 32) == 0) return 1;
+        existing = existing->next;
+    }
+
+    /* Write data to disk before touching the in-memory index */
+    if (!write_object_file(store, obj)) return 0;
+
+    /* Resize if needed — recompute index afterwards since capacity changed */
+    if ((double)store->count / store->capacity > 0.75) {
+        if (!resize_store(store)) return 0;
+        if (!write_index(store)) return 0; /* persist the rehashed index */
+        index = index_for(store, obj->id);
+    }
+
+    /* Allocate a lightweight index node (no data/metadata in memory) */
+    Object *index_obj = calloc(1, sizeof(Object));
+    if (!index_obj) return 0;
+
+    memcpy(index_obj->id, obj->id, 32);
+    index_obj->size     = obj->size;
+    index_obj->data     = NULL;
+    index_obj->metadata = NULL;
+
+    ObjectNode *node = malloc(sizeof(ObjectNode));
+    if (!node) {
+        free(index_obj);
+        return 0;
+    }
+
+    node->obj  = index_obj;
+    node->next = store->buckets[index];
+    store->buckets[index] = node;
+    store->count++;
+
+    /* Persist the updated index */
+    if (!write_index(store)) {
+        /* Roll back the in-memory insert so state stays consistent */
+        store->buckets[index] = node->next;
+        store->count--;
+        free(index_obj);
+        free(node);
+        return 0;
+    }
+
+    return 1;
+}
+
+/* Lookup — finds the index entry, loads data from disk, returns a heap-allocated Object */
+
+Object *get_object(ObjectStore *store, const unsigned char id[32]) {
+    if (!store || !id) return NULL;
+
+    size_t index = index_for(store, id);
+    ObjectNode *node = store->buckets[index];
+
+    while (node) {
+        if (memcmp(node->obj->id, id, 32) == 0) {
+            Object *obj = malloc(sizeof(Object));
+            if (!obj) return NULL;
+
+            if (!read_object_file(store, id, obj)) {
+                free(obj);
+                return NULL;
+            }
+
+            return obj;
+        }
+        node = node->next;
+    }
+
+    return NULL;
+}
+
+/* Delete — removes from the in-memory index and deletes the file */
+
+int remove_object(ObjectStore *store, const unsigned char id[32]) {
+    if (!store || !id) return 0;
+
+    size_t index = index_for(store, id);
+
+    ObjectNode *node = store->buckets[index];
+    ObjectNode *prev = NULL;
+
+    while (node) {
+        if (memcmp(node->obj->id, id, 32) == 0) {
+            if (prev) {
+                prev->next = node->next;
+            } else {
+                store->buckets[index] = node->next;
+            }
+
+            delete_object_file(store, id);
+
+            free(node->obj->data);
+            free_metadata(node->obj->metadata);
+            free(node->obj);
+            free(node);
+            store->count--;
+
+            write_index(store); /* best-effort; removal already committed */
+            return 1;
+        }
+
+        prev = node;
+        node = node->next;
+    }
+
+    return 0;
+}
