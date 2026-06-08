@@ -1,9 +1,8 @@
 # X2S — eXtremely Simple Storage
 
-A lightweight, HTTP-based blob storage server written in C11. Upload and retrieve binary objects identified by their SHA-256 content hash, with per-object ACLs and user authentication.
+A lightweight, RESTful blob storage server written in C11. Upload and retrieve binary objects identified by their SHA-256 content hash, with per-object ACLs and user authentication.
 
 ## Quick start
-
 
 ```bash
 # install dependencies (Debian/Ubuntu)
@@ -57,11 +56,13 @@ Passwords are hashed with **PBKDF2-HMAC-SHA256** (100,000 iterations, random 16-
 
 Include the bearer token in the `Authorization` header. The token's user identity is used for ACL permission checks. Authentication is optional — requests without a token are treated as the `anonymous` user and have no access to any objects.
 
-#### ACL model
+#### ACL model & Deduplication
 
-When an object is uploaded, the uploading user is set as the **owner** and granted full read (`1`), write (`2`), and delete (`4`) permissions. Other users have **no access** by default. Duplicate uploads (same content hash) silently succeed but preserve the **original owner and ACL**.
+X2S employs a **Content-Addressable Storage (CAS)** paradigm where file contents are structurally isolated from access metadata:
 
-An owner can dynamically grant permissions to another user via the `/share` endpoint.
+* **Upload isolation:** When a user uploads a file, a unique tracking identifier is generated for them by mixing their `user_id` with the object's properties. This means if two separate users upload the exact same file, they receive **independent tracking objects** with distinct owners, separate filenames, and completely isolated Access Control Lists (ACLs).
+* **Storage Deduplication:** On disk, the unique metadata file points to a shared data blob named strictly after the SHA-256 hash of the raw bytes. If multiple users upload the same file, it will only be stored **once on disk**, drastically reducing storage consumption.
+* **Sharing:** An owner can dynamically grant permissions to another user via the `/share` endpoint.
 
 ```bash
 # upload
@@ -86,6 +87,15 @@ curl -X DELETE -H 'Authorization: Bearer <token>' \
 
 ```
 
+#### Reference-Checked Deletion (`DELETE /objects/<id>`)
+
+Because data payloads are shared across multiple metadata entries, deletion operates using a safety-first reference-counting model:
+
+1. When a user requests a deletion, their specific metadata tracking file (which stores their permissions and filenames) is wiped from disk immediately.
+2. The server scans the internal index to see if *any other tracking entries* are pointing to that shared data blob.
+3. If other users are still referencing that file content, the shared data blob is preserved so their access remains undisturbed.
+4. The moment the **last user** referencing that content deletes their object, the reference count drops to zero, and the actual raw data payload file is purged from disk.
+
 #### Dynamic Sharing (`POST /objects/<id>/share`)
 
 Allows the object **owner** to append or update access permissions for a specific user ID. The request uses `application/x-www-form-urlencoded` format parameters:
@@ -105,7 +115,7 @@ Allows the object **owner** to append or update access permissions for a specifi
 | `X-Extension` | File extension (no dot); used for `Content-Type` on download |
 | `X-Filename` | Original filename |
 
-### Error responses
+## Error responses
 
 All errors return JSON:
 
@@ -129,8 +139,11 @@ All errors return JSON:
 
 ## Storage
 
-* **On-disk**: Each object is a file in `./x2s_data/` named by its 64-character hex SHA-256 hash. The binary format stores data length, metadata lengths, owner ID (16 bytes), ACL entries, raw data, and metadata strings.
-* **In-memory index**: A chained hash table (FNV-1a) maps object IDs to lightweight entries. Resizes when load factor exceeds 0.75. Persisted atomically (temp file + rename) to `./x2s_data/__index`. Modifying object ACLs rewrites the associated object file data and updates this volatile cache.
+All persistent storage files live in `./x2s_data/` and adhere to a split model layout:
+
+* **Metadata Tracking Files (`./x2s_data/<object_id>`)**: Named by a 64-character hex hash that is unique per user upload. The binary layout stores data length, metadata lengths, owner ID (16 bytes), ACL structures, a **32-byte SHA-256 pointer hash of the data content block**, and user metadata strings.
+* **Shared Data Blobs (`./x2s_data/data_<data_hash>`)**: Named with a `data_` prefix followed by the 64-character hex hash of the *raw contents alone*. This file is decoupled from usernames, access tokens, and access patterns.
+* **In-memory index**: A chained hash table (FNV-1a) maps object tracking IDs to lightweight entries. Resizes when load factor exceeds 0.75. Persisted atomically (temp file + rename) to `./x2s_data/__index`. Modifying object ACLs rewrites the associated object metadata file and updates this volatile cache.
 * **User accounts**: Stored as binary at `./x2s_data/__users`. Survive server restarts. Sessions are ephemeral and lost on restart (re-login required).
 * **Atomic writes**: Both the object index and user database use a write-then-rename strategy to prevent corruption on crash.
 
@@ -160,10 +173,12 @@ cmake -S . -B build && cmake --build build
 ## Design notes
 
 * **Single-threaded** — libmicrohttpd internal polling thread handles all I/O. No locking, no concurrent access safety.
-* **No TLS** — intended for trusted/internal networks. Pair with a reverse proxy (nginx, Caddy) for TLS termination.
-* **Content-addressed** — object IDs are SHA-256 hashes of data + metadata. Duplicate uploads silently return the existing ID and preserve the original owner/ACL.
+* **No TLS** — intended for trusted/internal networks.**It is highly recommended to pair this with a reverse proxy like Nginx**
+* **Content-addressed & Deduplicated** — payload contents are identified via unique data hashes. Multiple metadata targets reference identical chunks on disk, achieving file deduplication across users while preserving access control sandboxing.
 * **Constant-time comparisons** — password hashes and session tokens are compared with `CRYPTO_memcmp` to mitigate timing attacks.
-* **No session expiry** — bearer tokens live until server restart. Re-authentication is required after restart.
+* **No session expiry** — bearer tokens live until server restart. Re-authentication is required after restart. (This is a future feature)
 * **Maximum password length** — 1024 bytes.
 * **Maximum object size** — 64 MiB (hardcoded as `MAX_UPLOAD_SIZE` in `api_server.c`).
-* **No rate limiting** — `/auth/login` accepts unlimited requests; pair with external rate limiting for brute-force protection.
+* **No rate limiting** — `/auth/login` accepts unlimited requests; pair with external rate limiting for brute-force protection. (This is a future feature)
+
+For now, use a reverse proxy to rate limit and add TLS
