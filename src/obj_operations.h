@@ -13,4 +13,7 @@ int remove_object(ObjectStore *store, User *user, const unsigned char id[32]);
 int check_object_permission(ObjectStore *store, const unsigned char id[32],
                             unsigned char user_id[16], uint32_t perm);
 
+int share_object(ObjectStore *store, User *requester, const unsigned char id[32], 
+                 unsigned char target_user_id[16], uint32_t permissions);
+
 #endif

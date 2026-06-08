@@ -4,6 +4,7 @@ A lightweight, HTTP-based blob storage server written in C11. Upload and retriev
 
 ## Quick start
 
+
 ```bash
 # install dependencies (Debian/Ubuntu)
 sudo apt install build-essential cmake libmicrohttpd-dev libssl-dev
@@ -13,16 +14,19 @@ cmake -S . -B build && cmake --build build
 
 # run
 ./build/x2s
+
 ```
 
 ```
-Listening on http://0.0.0.0:8080
+Listening on [http://0.0.0.0:8080](http://0.0.0.0:8080)
   POST  /auth/register      register a new user
   POST  /auth/login          authenticate and get a token
   POST  /auth/logout         invalidate a token
   POST  /objects             upload an object
   GET   /objects/<id>        retrieve an object
   DELETE /objects/<id>       remove an object
+  POST  /objects/<id>/share  grant object permissions to another user
+
 ```
 
 ## API
@@ -44,6 +48,7 @@ curl -X POST http://localhost:8080/auth/login \
 # logout
 curl -X POST http://localhost:8080/auth/logout \
   -H 'Authorization: Bearer <token>'
+
 ```
 
 Passwords are hashed with **PBKDF2-HMAC-SHA256** (100,000 iterations, random 16-byte salt, max 1024 bytes). The server stores only the salted hash — never the plaintext password. Password hashes and session tokens are compared using **constant-time** (`CRYPTO_memcmp`) to prevent timing side-channel attacks.
@@ -54,7 +59,9 @@ Include the bearer token in the `Authorization` header. The token's user identit
 
 #### ACL model
 
-When an object is uploaded, the uploading user is set as the **owner** and granted read, write, and delete permissions. Other users have **no access** unless the ACL is modified (currently no API to modify ACLs — this is a future extension). Duplicate uploads (same content hash) silently succeed but preserve the **original owner and ACL**.
+When an object is uploaded, the uploading user is set as the **owner** and granted full read (`1`), write (`2`), and delete (`4`) permissions. Other users have **no access** by default. Duplicate uploads (same content hash) silently succeed but preserve the **original owner and ACL**.
+
+An owner can dynamically grant permissions to another user via the `/share` endpoint.
 
 ```bash
 # upload
@@ -68,15 +75,32 @@ curl -X POST http://localhost:8080/objects \
 curl -H 'Authorization: Bearer <token>' \
   http://localhost:8080/objects/63a46a45f4bcc89a04adfefccdfdbb5b66a659d92cb54dd2bdb4e1705d06996a
 
+# share object with another user (granting read permission: 1)
+curl -X POST http://localhost:8080/objects/63a46a45f4bcc89a04adfefccdfdbb5b66a659d92cb54dd2bdb4e1705d06996a/share \
+  -H 'Authorization: Bearer <token>' \
+  -d 'user_id=b0fca315c89a04adfe123456789abcde&permissions=1'
+
 # delete
 curl -X DELETE -H 'Authorization: Bearer <token>' \
   http://localhost:8080/objects/63a46a45f4bcc89a04adfefccdfdbb5b66a659d92cb54dd2bdb4e1705d06996a
+
 ```
+
+#### Dynamic Sharing (`POST /objects/<id>/share`)
+
+Allows the object **owner** to append or update access permissions for a specific user ID. The request uses `application/x-www-form-urlencoded` format parameters:
+
+| Parameter | Type | Description |
+| --- | --- | --- |
+| `user_id` | Hex String (32 chars) | The target 16-byte raw user ID to update permissions for. |
+| `permissions` | Integer | A bitmask of granted capabilities: `1` (Read), `2` (Write), `4` (Delete). |
+
+*Returns `204 No Content` on successful update. Returns `403 Forbidden` if a non-owner tries to execute the share request.*
 
 #### Optional upload headers
 
 | Header | Description |
-|--------|-------------|
+| --- | --- |
 | `X-Category` | Arbitrary category tag |
 | `X-Extension` | File extension (no dot); used for `Content-Type` on download |
 | `X-Filename` | Original filename |
@@ -87,16 +111,17 @@ All errors return JSON:
 
 ```json
 {"error":"<message>"}
+
 ```
 
 | Status | Meaning |
-|--------|---------|
+| --- | --- |
 | 201 | Object created |
 | 204 | Success (no body) |
-| 400 | Bad request |
+| 400 | Bad request / Missing parameter fields |
 | 401 | Authentication failed |
-| 403 | Access denied |
-| 404 | Not found |
+| 403 | Access denied / Only the owner can share this object |
+| 404 | Object not found |
 | 405 | Method not allowed |
 | 409 | Username taken |
 | 413 | Body exceeds 64 MiB limit |
@@ -104,39 +129,41 @@ All errors return JSON:
 
 ## Storage
 
-- **On-disk**: Each object is a file in `./x2s_data/` named by its 64-character hex SHA-256 hash. The binary format stores data length, metadata lengths, owner ID (16 bytes), ACL entries, raw data, and metadata strings.
-- **In-memory index**: A chained hash table (FNV-1a) maps object IDs to lightweight entries. Resizes when load factor exceeds 0.75. Persisted atomically (temp file + rename) to `./x2s_data/__index`.
-- **User accounts**: Stored as binary at `./x2s_data/__users`. Survive server restarts. Sessions are ephemeral and lost on restart (re-login required).
-- **Atomic writes**: Both the object index and user database use a write-then-rename strategy to prevent corruption on crash.
+* **On-disk**: Each object is a file in `./x2s_data/` named by its 64-character hex SHA-256 hash. The binary format stores data length, metadata lengths, owner ID (16 bytes), ACL entries, raw data, and metadata strings.
+* **In-memory index**: A chained hash table (FNV-1a) maps object IDs to lightweight entries. Resizes when load factor exceeds 0.75. Persisted atomically (temp file + rename) to `./x2s_data/__index`. Modifying object ACLs rewrites the associated object file data and updates this volatile cache.
+* **User accounts**: Stored as binary at `./x2s_data/__users`. Survive server restarts. Sessions are ephemeral and lost on restart (re-login required).
+* **Atomic writes**: Both the object index and user database use a write-then-rename strategy to prevent corruption on crash.
 
 ## Build
 
 ### Dependencies
 
-- **CMake** ≥ 3.15
-- **libmicrohttpd** (embedded HTTP server)
-- **OpenSSL** `libcrypto` (SHA-256, PBKDF2, random bytes, constant-time comparison)
-- A C11 compiler (GCC, Clang)
+* **CMake** ≥ 3.15
+* **libmicrohttpd** (embedded HTTP server)
+* **OpenSSL** `libcrypto` (SHA-256, PBKDF2, random bytes, constant-time comparison)
+* A C11 compiler (GCC, Clang)
 
 ### Compile
 
 ```bash
 cmake -S . -B build && cmake --build build
+
 ```
 
 ### Run on a custom port
 
 ```bash
 ./build/x2s 9090
+
 ```
 
 ## Design notes
 
-- **Single-threaded** — libmicrohttpd internal polling thread handles all I/O. No locking, no concurrent access safety.
-- **No TLS** — intended for trusted/internal networks. Pair with a reverse proxy (nginx, Caddy) for TLS termination.
-- **Content-addressed** — object IDs are SHA-256 hashes of data + metadata. Duplicate uploads silently return the existing ID and preserve the original owner/ACL.
-- **Constant-time comparisons** — password hashes and session tokens are compared with `CRYPTO_memcmp` to mitigate timing attacks.
-- **No session expiry** — bearer tokens live until server restart. Re-authentication is required after restart.
-- **Maximum password length** — 1024 bytes.
-- **Maximum object size** — 64 MiB (hardcoded as `MAX_UPLOAD_SIZE` in `api_server.c`).
-- **No rate limiting** — `/auth/login` accepts unlimited requests; pair with external rate limiting for brute-force protection.
+* **Single-threaded** — libmicrohttpd internal polling thread handles all I/O. No locking, no concurrent access safety.
+* **No TLS** — intended for trusted/internal networks. Pair with a reverse proxy (nginx, Caddy) for TLS termination.
+* **Content-addressed** — object IDs are SHA-256 hashes of data + metadata. Duplicate uploads silently return the existing ID and preserve the original owner/ACL.
+* **Constant-time comparisons** — password hashes and session tokens are compared with `CRYPTO_memcmp` to mitigate timing attacks.
+* **No session expiry** — bearer tokens live until server restart. Re-authentication is required after restart.
+* **Maximum password length** — 1024 bytes.
+* **Maximum object size** — 64 MiB (hardcoded as `MAX_UPLOAD_SIZE` in `api_server.c`).
+* **No rate limiting** — `/auth/login` accepts unlimited requests; pair with external rate limiting for brute-force protection.

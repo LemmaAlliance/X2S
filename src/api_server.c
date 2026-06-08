@@ -609,6 +609,87 @@ static enum MHD_Result handle_auth_logout(struct MHD_Connection *conn,
   return ret;
 }
 
+
+static enum MHD_Result handle_share(struct MHD_Connection *conn,
+                                   ApiServer *server, const char *hex_id,
+                                   const char *upload_data,
+                                   size_t *upload_data_size, void **con_cls) {
+  /* Step 1: Accumulate request payload body chunks */
+  if (!*con_cls) {
+    UploadBuffer *ub = calloc(1, sizeof(UploadBuffer));
+    if (!ub) return MHD_NO;
+    *con_cls = ub;
+    return MHD_YES;
+  }
+
+  UploadBuffer *ub = *con_cls;
+
+  if (*upload_data_size > 0) {
+    size_t incoming = *upload_data_size;
+    if (ub->len + incoming > 4096)
+      return send_error(conn, MHD_HTTP_BAD_REQUEST, "body too large");
+
+    if (ub->len + incoming > ub->cap) {
+      size_t new_cap = (ub->cap == 0) ? incoming : ub->cap;
+      while (new_cap < ub->len + incoming) new_cap *= 2;
+      char *tmp = realloc(ub->buf, new_cap);
+      if (!tmp) return MHD_NO;
+      ub->buf = tmp;
+      ub->cap = new_cap;
+    }
+
+    memcpy(ub->buf + ub->len, upload_data, incoming);
+    ub->len += incoming;
+    *upload_data_size = 0;
+    return MHD_YES;
+  }
+
+  if (ub->len == 0)
+    return send_error(conn, MHD_HTTP_BAD_REQUEST, "empty body");
+
+  /* Step 2: Validate Target Resource ID */
+  unsigned char id[32];
+  if (!parse_hex_id(hex_id, id))
+    return send_error(conn, MHD_HTTP_BAD_REQUEST, "invalid object id");
+
+  /* Step 3: Extract the requester user session context details */
+  User user;
+  get_user_from_request(conn, &user, server->tokens);
+
+  /* Step 4: Parse required parameter values out of form body */
+  char target_uid_hex[33] = {0};
+  char perm_str[16] = {0};
+
+  if (!parse_form_field(ub->buf, "user_id", target_uid_hex, sizeof(target_uid_hex)) ||
+      !parse_form_field(ub->buf, "permissions", perm_str, sizeof(perm_str))) {
+    return send_error(conn, MHD_HTTP_BAD_REQUEST, "missing user_id or permissions");
+  }
+
+  unsigned char target_uid_bin[16];
+  if (!hex_to_bytes(target_uid_hex, target_uid_bin, 16)) {
+    return send_error(conn, MHD_HTTP_BAD_REQUEST, "invalid target user_id format");
+  }
+
+  uint32_t permissions = (uint32_t)strtoul(perm_str, NULL, 10);
+
+  /* Step 5: Route request directly downward to core data storage interface execution logic */
+  int res = share_object(server->store, &user, id, target_uid_bin, permissions);
+  if (res == -1)
+    return send_error(conn, MHD_HTTP_NOT_FOUND, "object not found");
+  if (res == -2)
+    return send_error(conn, MHD_HTTP_FORBIDDEN, "only the owner can share this object");
+  if (res == 0)
+    return send_error(conn, MHD_HTTP_INTERNAL_SERVER_ERROR, "failed to update permissions");
+
+  /* Step 6: Respond back with empty HTTP 204 status confirmation on successful completion */
+  struct MHD_Response *resp = MHD_create_response_from_buffer(0, NULL, MHD_RESPMEM_PERSISTENT);
+  if (!resp) return MHD_NO;
+
+  enum MHD_Result ret = MHD_queue_response(conn, MHD_HTTP_NO_CONTENT, resp);
+  MHD_destroy_response(resp);
+  return ret;
+}
+
 /* -------------------------------------------------------------------------
  * Main MHD access callback — router
  * ---------------------------------------------------------------------- */
@@ -658,20 +739,43 @@ access_handler(void *cls, struct MHD_Connection *conn, const char *url,
                       "only POST is accepted on /objects");
   }
 
-  /* Prefix match: /objects/<id> */
+  /* Prefix match: /objects/<id> & /objects/<id>/share*/
   if (strncmp(url, "/objects/", 9) == 0) {
     const char *hex_id = url + 9;
+    
+    // Check if the URL string has a trailing /share substring mapping
+    size_t id_len = strlen(hex_id);
+    int is_share_route = 0;
+    char extracted_id[65] = {0};
 
-    /* Initialise con_cls for the first call on non-POST/non-PUT routes */
+    if (id_len > 6 && strcmp(hex_id + id_len - 6, "/share") == 0) {
+      is_share_route = 1;
+      if (id_len - 6 < 65) {
+        memcpy(extracted_id, hex_id, id_len - 6);
+      }
+    } else {
+      if (id_len < 65) {
+        strcpy(extracted_id, hex_id);
+      }
+    }
+
+    if (is_share_route) {
+      if (strcmp(method, "POST") == 0) {
+        return handle_share(conn, server, extracted_id, upload_data, upload_data_size, con_cls);
+      }
+      return send_error(conn, MHD_HTTP_METHOD_NOT_ALLOWED, "only POST is accepted on /objects/<id>/share");
+    }
+
+    /* Initialise con_cls for the first call on standard non-POST/non-PUT routes */
     if (!*con_cls) {
       *con_cls = (void *)1; /* sentinel — no buffer needed */
       return MHD_YES;
     }
 
     if (strcmp(method, "GET") == 0)
-      return handle_get(conn, server, hex_id);
+      return handle_get(conn, server, extracted_id);
     if (strcmp(method, "DELETE") == 0)
-      return handle_delete(conn, server, hex_id);
+      return handle_delete(conn, server, extracted_id);
 
     return send_error(conn, MHD_HTTP_METHOD_NOT_ALLOWED,
                       "only GET and DELETE are accepted on /objects/<id>");

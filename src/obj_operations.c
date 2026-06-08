@@ -753,3 +753,96 @@ int remove_object(ObjectStore *store, User *user, const unsigned char id[32]) {
 
     return 0;
 }
+
+// Share an object given permissions
+int share_object(ObjectStore *store, User *requester, const unsigned char id[32], 
+                 unsigned char target_user_id[16], uint32_t permissions) {
+    if (!store || !requester || !id) return 0;
+
+    size_t index = index_for(store, id);
+    ObjectNode *node = store->buckets[index];
+
+    while (node) {
+        if (memcmp(node->obj->id, id, 32) == 0) {
+            // 1. Enforce that only the true owner can alter permissions
+            if (memcmp(node->obj->owner, requester->user_id, 16) != 0) {
+                return -2; // Return custom sentinel for HTTP 403 Forbidden
+            }
+
+            // 2. Read the full object data out from the disk file first 
+            // so we can rewrite it fully with the updated ACLs.
+            Object full_obj = {0};
+            if (!read_object_file(store, id, &full_obj)) {
+                return 0;
+            }
+
+            // 3. Search to see if target user already exists in full_obj.acl
+            int found = 0;
+            if (full_obj.acl) {
+                for (size_t i = 0; i < full_obj.acl->count; i++) {
+                    if (memcmp(full_obj.acl->entries[i].user_id, target_user_id, 16) == 0) {
+                        full_obj.acl->entries[i].permissions = permissions;
+                        found = 1;
+                        break;
+                    }
+                }
+            }
+
+            // 4. If target user was not found, grow the ACL list entry array
+            if (!found) {
+                size_t old_count = full_obj.acl ? full_obj.acl->count : 0;
+                size_t new_count = old_count + 1;
+                
+                ACLEntry *new_entries = realloc(full_obj.acl ? full_obj.acl->entries : NULL, 
+                                                new_count * sizeof(ACLEntry));
+                if (!new_entries) {
+                    free(full_obj.data);
+                    if (full_obj.acl) { free(full_obj.acl->entries); free(full_obj.acl); }
+                    free_metadata(full_obj.metadata);
+                    return 0;
+                }
+
+                if (!full_obj.acl) {
+                    full_obj.acl = calloc(1, sizeof(ACL));
+                    if (!full_obj.acl) {
+                        free(new_entries);
+                        free(full_obj.data);
+                        free_metadata(full_obj.metadata);
+                        return 0;
+                    }
+                }
+
+                full_obj.acl->entries = new_entries;
+                full_obj.acl->count = new_count;
+
+                memcpy(full_obj.acl->entries[old_count].user_id, target_user_id, 16);
+                full_obj.acl->entries[old_count].permissions = permissions;
+            }
+
+            // 5. Commit updated object format back down to disk file layout
+            if (!write_object_file(store, &full_obj)) {
+                free(full_obj.data);
+                free(full_obj.acl->entries);
+                free(full_obj.acl);
+                free_metadata(full_obj.metadata);
+                return 0;
+            }
+
+            // 6. Free up memory associated with the disk file payload variables
+            free(full_obj.data);
+            free_metadata(full_obj.metadata);
+
+            // 7. Update the in-memory cache index entry representation as well
+            if (node->obj->acl) {
+                free(node->obj->acl->entries);
+                free(node->obj->acl);
+            }
+            node->obj->acl = full_obj.acl;
+
+            return 1; // Success
+        }
+        node = node->next;
+    }
+
+    return -1; // Return custom sentinel for HTTP 404 Not Found
+}
