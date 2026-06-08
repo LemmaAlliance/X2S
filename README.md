@@ -20,7 +20,7 @@ Listening on http://0.0.0.0:8080
   POST  /auth/register      register a new user
   POST  /auth/login          authenticate and get a token
   POST  /auth/logout         invalidate a token
-  PUT   /objects             upload an object
+  POST  /objects             upload an object
   GET   /objects/<id>        retrieve an object
   DELETE /objects/<id>       remove an object
 ```
@@ -58,7 +58,7 @@ When an object is uploaded, the uploading user is set as the **owner** and grant
 
 ```bash
 # upload
-curl -X PUT http://localhost:8080/objects \
+curl -X POST http://localhost:8080/objects \
   -H 'Authorization: Bearer <token>' \
   -H 'X-Filename: hello.txt' \
   -d 'Hello, World!'

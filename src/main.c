@@ -60,7 +60,7 @@ int main(int argc, char *argv[]) {
   printf("  POST  /auth/register      register a new user\n");
   printf("  POST  /auth/login          authenticate and get a token\n");
   printf("  POST  /auth/logout         invalidate a token\n");
-  printf("  PUT   /objects             upload an object\n");
+  printf("  POST  /objects             upload an object\n");
   printf("  GET   /objects/<id>        retrieve an object\n");
   printf("  DELETE /objects/<id>       remove an object\n");
   printf("Press Ctrl-C to stop.\n\n");
