@@ -151,25 +151,33 @@ int parse_form_field(const char *body, const char *field, char *out,
  *   X-Username: plain text name (max 63 chars)
  */
 void get_user_from_request(struct MHD_Connection *conn, User *user,
-                                  TokenStore *tokens) {
+                           TokenStore *tokens) {
+  // 1. Initialize to a safe baseline default (Anonymous)
   memset(user, 0, sizeof(User));
-  strcpy(user->username, "anonymous");
+  snprintf(user->username, sizeof(user->username), "anonymous");
 
   const char *auth =
       MHD_lookup_connection_value(conn, MHD_HEADER_KIND, "Authorization");
-  if (auth && strncmp(auth, "Bearer ", 7) == 0 && tokens) {
-    const char *hex_token = auth + 7;
-    if (strlen(hex_token) == TOKEN_SIZE * 2) {
-      unsigned char token_bin[TOKEN_SIZE];
-      if (hex_to_bytes(hex_token, token_bin, TOKEN_SIZE)) {
-        unsigned char uid[16];
-        if (session_lookup(tokens->sessions, token_bin, uid)) {
-          memcpy(user->user_id, uid, 16);
-          user_store_get_username(tokens->users, uid, user->username,
-                                  sizeof(user->username));
-          return;
+  
+  // 2. If an Authorization header is attempted, strictly validate it
+  if (auth) {
+    if (strncmp(auth, "Bearer ", 7) == 0 && tokens) {
+      const char *hex_token = auth + 7;
+      if (strlen(hex_token) == TOKEN_SIZE * 2) {
+        unsigned char token_bin[TOKEN_SIZE];
+        if (hex_to_bytes(hex_token, token_bin, TOKEN_SIZE)) {
+          unsigned char uid[16];
+          if (session_lookup(tokens->sessions, token_bin, uid)) {
+            // Token is verified and valid
+            memcpy(user->user_id, uid, 16);
+            user_store_get_username(tokens->users, uid, user->username,
+                                    sizeof(user->username));
+            return; // Successfully authenticated
+          }
         }
       }
     }
   }
+
+  return;
 }

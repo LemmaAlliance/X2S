@@ -61,6 +61,7 @@ int main(int argc, char *argv[]) {
   printf("  POST  /auth/login          authenticate and get a token\n");
   printf("  POST  /auth/logout         invalidate a token\n");
   printf("  POST  /objects             upload an object\n");
+  printf("  GET   /objects             list owned objects\n");
   printf("  GET   /objects/<id>        retrieve an object\n");
   printf("  DELETE /objects/<id>       remove an object\n");
   printf("Press Ctrl-C to stop.\n\n");

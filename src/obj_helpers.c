@@ -122,75 +122,6 @@ int check_object_permission(ObjectStore *store, const unsigned char id[32],
     return -1;
 }
 
-int load_index(ObjectStore *store) {
-    char index_path[PATH_MAX_LEN + 16];
-    snprintf(index_path, sizeof(index_path),
-             "%s/__index", store->store_path);
-
-    FILE *f = fopen(index_path, "rb");
-    if (!f) return 0; // first run, no index yet
-
-    size_t capacity = 0;
-    size_t count = 0;
-
-    if (fread(&capacity, sizeof(size_t), 1, f) != 1 ||
-        fread(&count, sizeof(size_t), 1, f) != 1) {
-        fclose(f);
-        return 0;
-    }
-
-    // If stored capacity differs, adjust store BEFORE inserting
-    if (capacity != store->capacity) {
-        ObjectNode **new_buckets =
-            calloc(capacity, sizeof(ObjectNode *));
-        if (!new_buckets) {
-            fclose(f);
-            return 0;
-        }
-
-        free(store->buckets);
-        store->buckets = new_buckets;
-        store->capacity = capacity;
-    }
-
-    store->count = 0; // we'll recompute safely
-
-    for (size_t i = 0; i < count; i++) {
-        unsigned char id[32];
-
-        if (fread(id, 1, 32, f) != 32) {
-            fclose(f);
-            return 0;
-        }
-
-        Object *index_obj = calloc(1, sizeof(Object));
-        if (!index_obj) {
-            fclose(f);
-            return 0;
-        }
-
-        memcpy(index_obj->id, id, 32);
-
-        ObjectNode *node = malloc(sizeof(ObjectNode));
-        if (!node) {
-            free(index_obj);
-            fclose(f);
-            return 0;
-        }
-
-        size_t index = index_for(store, id);
-
-        node->obj = index_obj;
-        node->next = store->buckets[index];
-        store->buckets[index] = node;
-
-        store->count++;
-    }
-
-    fclose(f);
-    return 1;
-}
-
 /* Convert 32-byte binary ID to 64-char hex string (+ null terminator) */
 
 void id_to_hex(const unsigned char id[32], char out[65]) {
@@ -293,7 +224,7 @@ int compute_data_hash(const void *data, size_t size, unsigned char out[32]) {
  */
 
 int write_object_file(ObjectStore *store, Object *obj) {
-    char path[512];
+    char path[4096 + 128];
     object_path(store, obj->id, path, sizeof(path));
 
     FILE *f = fopen(path, "wb");
@@ -481,4 +412,93 @@ void delete_data_blob_file(ObjectStore *store, const unsigned char data_hash[32]
     id_to_hex(data_hash, data_hex);
     snprintf(data_path, sizeof(data_path), "%s/data_%s", store->store_path, data_hex);
     remove(data_path);
+}
+
+int load_index(ObjectStore *store) {
+    char index_path[PATH_MAX_LEN + 16];
+    snprintf(index_path, sizeof(index_path),
+             "%s/__index", store->store_path);
+
+    FILE *f = fopen(index_path, "rb");
+    if (!f) return 0; // first run, no index yet
+
+    size_t capacity = 0;
+    size_t count = 0;
+
+    if (fread(&capacity, sizeof(size_t), 1, f) != 1 ||
+        fread(&count, sizeof(size_t), 1, f) != 1) {
+        fclose(f);
+        return 0;
+    }
+
+    // If stored capacity differs, adjust store BEFORE inserting
+    if (capacity != store->capacity) {
+        ObjectNode **new_buckets =
+            calloc(capacity, sizeof(ObjectNode *));
+        if (!new_buckets) {
+            fclose(f);
+            return 0;
+        }
+
+        free(store->buckets);
+        store->buckets = new_buckets;
+        store->capacity = capacity;
+    }
+
+    store->count = 0; // we'll recompute safely
+
+    for (size_t i = 0; i < count; i++) {
+        unsigned char id[32];
+
+        if (fread(id, 1, 32, f) != 32) {
+            fclose(f);
+            return 0;
+        }
+
+        Object *index_obj = calloc(1, sizeof(Object));
+        if (!index_obj) {
+            fclose(f);
+            return 0;
+        }
+
+        /* Read the object file to populate the index's security fields */
+        Object temporary_load = {0};
+        if (read_object_file(store, id, &temporary_load)) {
+            // Copy security permissions into the index item
+            memcpy(index_obj->owner, temporary_load.owner, 16);
+            index_obj->acl = temporary_load.acl;
+            index_obj->size = temporary_load.size;
+            
+            // Free the data and strings we don't need in the lightweight index
+            free(temporary_load.data);
+            free_metadata(temporary_load.metadata);
+        } else {
+            // Fallback if file is corrupted/missing
+            memcpy(index_obj->id, id, 32);
+        }
+
+        memcpy(index_obj->id, id, 32);
+
+        ObjectNode *node = malloc(sizeof(ObjectNode));
+        if (!node) {
+            if (index_obj->acl) {
+                free(index_obj->acl->entries);
+                free(index_obj->acl);
+            }
+            free(index_obj);
+            fclose(f);
+            return 0;
+        }
+
+        size_t index = index_for(store, id);
+
+        node->obj = index_obj;
+        node->next = store->buckets[index];
+        store->buckets[index] = node;
+
+        store->count++;
+    }
+
+    fclose(f);
+    return 1;
 }

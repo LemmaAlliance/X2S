@@ -177,10 +177,26 @@ int put_object(ObjectStore *store, User *user, Object *obj) {
     ObjectNode *existing = store->buckets[index];
     while (existing) {
         if (memcmp(existing->obj->id, obj->id, 32) == 0) {
-            free(obj->acl->entries);
-            free(obj->acl);
-            obj->acl = NULL;
-            return 1;
+            /* 1. Free ACL structural allocations */
+            if (obj->acl) {
+                free(obj->acl->entries);
+                free(obj->acl);
+                obj->acl = NULL;
+            }
+            
+            /* 2. Free the binary blob data buffer payload */
+            if (obj->data) {
+                free(obj->data);
+                obj->data = NULL;
+            }
+
+            /* 3. Free the complex heap-allocated metadata layout */
+            if (obj->metadata) {
+                free_metadata(obj->metadata);
+                obj->metadata = NULL;
+            }
+
+            return 1; // Content matches existing item, return successfully
         }
         existing = existing->next;
     }
@@ -202,7 +218,16 @@ int put_object(ObjectStore *store, User *user, Object *obj) {
     memcpy(index_obj->id, obj->id, 32);
     index_obj->size = obj->size;
     index_obj->data = NULL;
-    index_obj->metadata = NULL;
+    if (obj->metadata) {
+        index_obj->metadata = calloc(1, sizeof(Metadata));
+        if (index_obj->metadata) {
+            index_obj->metadata->category = obj->metadata->category ? strdup(obj->metadata->category) : NULL;
+            index_obj->metadata->extension = obj->metadata->extension ? strdup(obj->metadata->extension) : NULL;
+            index_obj->metadata->filename = obj->metadata->filename ? strdup(obj->metadata->filename) : NULL;
+        }
+    } else {
+        index_obj->metadata = NULL;
+    }
 
     /* IMPORTANT: carry security metadata in memory index too */
     memcpy(index_obj->owner, obj->owner, 16);
@@ -349,7 +374,7 @@ int remove_object(ObjectStore *store, User *user, const unsigned char id[32]) {
             free(node->obj);
             free(node);
 
-            store->count;
+            store->count--;
 
             write_index(store); // Re-sync index
             return 1;
@@ -453,4 +478,90 @@ int share_object(ObjectStore *store, User *requester, const unsigned char id[32]
     }
 
     return -1; // Return custom sentinel for HTTP 404 Not Found
+}
+
+/* Find and list all objects accessible by a user, with optional metadata filters */
+int list_user_objects(ObjectStore *store, User *user, 
+                      const char *filter_category, const char *filter_filename,
+                      const char *filter_extension,
+                      Object ***out_objects, size_t *out_count) {
+    if (!store || !user || !out_objects || !out_count) return 0;
+
+    size_t capacity = 16;
+    size_t count = 0;
+    Object **list = malloc(capacity * sizeof(Object *));
+    if (!list) return 0;
+
+    for (size_t i = 0; i < store->capacity; i++) {
+        ObjectNode *node = store->buckets[i];
+        while (node) {
+            if (has_permission(node->obj, user->user_id, PERM_READ)) {
+                Object *full_obj = malloc(sizeof(Object));
+                if (full_obj) {
+                    if (read_object_file(store, node->obj->id, full_obj)) {
+                        int matches = 1;
+
+                        // Apply optional category filter
+                        if (filter_category && strlen(filter_category) > 0) {
+                            if (!full_obj->metadata || !full_obj->metadata->category ||
+                                strcmp(full_obj->metadata->category, filter_category) != 0) {
+                                matches = 0;
+                            }
+                        }
+
+                        // Apply optional filename filter
+                        if (filter_filename && strlen(filter_filename) > 0) {
+                            if (!full_obj->metadata || !full_obj->metadata->filename ||
+                                strcmp(full_obj->metadata->filename, filter_filename) != 0) {
+                                matches = 0;
+                            }
+                        }
+
+                        // NEW: Apply optional extension filter
+                        if (filter_extension && strlen(filter_extension) > 0) {
+                            if (!full_obj->metadata || !full_obj->metadata->extension ||
+                                strcmp(full_obj->metadata->extension, filter_extension) != 0) {
+                                matches = 0;
+                            }
+                        }
+
+                        if (matches) {
+                            if (count >= capacity) {
+                                capacity *= 2;
+                                Object **tmp = realloc(list, capacity * sizeof(Object *));
+                                if (!tmp) {
+                                    for (size_t j = 0; j < count; j++) {
+                                        free(list[j]->data);
+                                        if (list[j]->acl) { free(list[j]->acl->entries); free(list[j]->acl); }
+                                        free_metadata(list[j]->metadata);
+                                        free(list[j]);
+                                    }
+                                    free(list);
+                                    free(full_obj->data);
+                                    if (full_obj->acl) { free(full_obj->acl->entries); free(full_obj->acl); }
+                                    free_metadata(full_obj->metadata);
+                                    free(full_obj);
+                                    return 0;
+                                }
+                                list = tmp;
+                            }
+                            list[count++] = full_obj;
+                        } else {
+                            free(full_obj->data);
+                            if (full_obj->acl) { free(full_obj->acl->entries); free(full_obj->acl); }
+                            free_metadata(full_obj->metadata);
+                            free(full_obj);
+                        }
+                    } else {
+                        free(full_obj);
+                    }
+                }
+            }
+            node = node->next;
+        }
+    }
+
+    *out_objects = list;
+    *out_count = count;
+    return 1;
 }

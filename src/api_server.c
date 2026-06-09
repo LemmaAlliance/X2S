@@ -205,6 +205,101 @@ static enum MHD_Result handle_delete(struct MHD_Connection *conn,
   return ret;
 }
 
+static enum MHD_Result handle_list_objects(struct MHD_Connection *conn, ApiServer *server) {
+    User user;
+    get_user_from_request(conn, &user, server->tokens);
+
+    // Extract optional query parameters
+    const char *category = MHD_lookup_connection_value(conn, MHD_GET_ARGUMENT_KIND, "category");
+    const char *filename = MHD_lookup_connection_value(conn, MHD_GET_ARGUMENT_KIND, "filename");
+    const char *extension = MHD_lookup_connection_value(conn, MHD_GET_ARGUMENT_KIND, "extension"); // NEW
+
+    Object **objects = NULL;
+    size_t count = 0;
+
+    // Pass the extension query string argument down into the logic routine
+    if (!list_user_objects(server->store, &user, category, filename, extension, &objects, &count)) {
+        return send_error(conn, MHD_HTTP_INTERNAL_SERVER_ERROR, "failed to read index files");
+    }
+
+    size_t json_cap = 1024;
+    char *json = malloc(json_cap);
+    if (!json) {
+        for (size_t i = 0; i < count; i++) {
+            free(objects[i]->data);
+            if (objects[i]->acl) { free(objects[i]->acl->entries); free(objects[i]->acl); }
+            free_metadata(objects[i]->metadata);
+            free(objects[i]);
+        }
+        free(objects);
+        return MHD_NO;
+    }
+
+    strcpy(json, "{\"objects\":[");
+    size_t json_len = strlen(json);
+
+    for (size_t i = 0; i < count; i++) {
+        char hex_id[65] = {0};
+        for (int j = 0; j < 32; j++) {
+            snprintf(hex_id + j * 2, 3, "%02x", objects[i]->id[j]);
+        }
+
+        const char *obj_cat = (objects[i]->metadata && objects[i]->metadata->category) ? objects[i]->metadata->category : "";
+        const char *obj_fn = (objects[i]->metadata && objects[i]->metadata->filename) ? objects[i]->metadata->filename : "";
+        const char *obj_ext = (objects[i]->metadata && objects[i]->metadata->extension) ? objects[i]->metadata->extension : ""; // NEW
+
+        // Allocate a buffer space that safely accommodates the addition of the extension property
+        size_t needed = strlen(hex_id) + strlen(obj_cat) + strlen(obj_fn) + strlen(obj_ext) + 160;
+
+        if (json_len + needed >= json_cap) {
+            json_cap *= 2;
+            char *tmp = realloc(json, json_cap);
+            if (!tmp) {
+                for (size_t k = 0; k < count; k++) {
+                    free(objects[k]->data);
+                    if (objects[k]->acl) { free(objects[k]->acl->entries); free(objects[k]->acl); }
+                    free_metadata(objects[k]->metadata);
+                    free(objects[k]);
+                }
+                free(objects);
+                free(json);
+                return MHD_NO;
+            }
+            json = tmp;
+        }
+
+        // Output format now tracks the extension key:
+        // {"id":"...","category":"...","filename":"...","extension":"...","size":123}
+        size_t written = snprintf(json + json_len, json_cap - json_len,
+            "%s{\"id\":\"%s\",\"category\":\"%s\",\"filename\":\"%s\",\"extension\":\"%s\",\"size\":%zu}",
+            (i > 0) ? "," : "", hex_id, obj_cat, obj_fn, obj_ext, objects[i]->size);
+        
+        json_len += written;
+    }
+
+    strcat(json, "]}");
+    json_len = strlen(json);
+
+    for (size_t i = 0; i < count; i++) {
+        free(objects[i]->data);
+        if (objects[i]->acl) { free(objects[i]->acl->entries); free(objects[i]->acl); }
+        free_metadata(objects[i]->metadata);
+        free(objects[i]);
+    }
+    free(objects);
+
+    struct MHD_Response *resp = MHD_create_response_from_buffer(json_len, json, MHD_RESPMEM_MUST_FREE);
+    if (!resp) {
+        free(json);
+        return MHD_NO;
+    }
+
+    MHD_add_response_header(resp, "Content-Type", "application/json");
+    enum MHD_Result ret = MHD_queue_response(conn, MHD_HTTP_OK, resp);
+    MHD_destroy_response(resp);
+    return ret;
+}
+
 /* -------------------------------------------------------------------------
  * Auth route handlers
  * ---------------------------------------------------------------------- */
@@ -545,10 +640,14 @@ access_handler(void *cls, struct MHD_Connection *conn, const char *url,
   }
 
   if (strcmp(url, "/objects") == 0) {
-    if (strcmp(method, "POST") == 0)
+    if (strcmp(method, "POST") == 0) {
       return handle_put(conn, server, upload_data, upload_data_size, con_cls);
+    }
+    if (strcmp(method, "GET") == 0) {
+      return handle_list_objects(conn, server);
+    }
     return send_error(conn, MHD_HTTP_METHOD_NOT_ALLOWED,
-                      "only POST is accepted on /objects");
+                      "only POST and GET are accepted on /objects");
   }
 
   /* Prefix match: /objects/<id> & /objects/<id>/share*/

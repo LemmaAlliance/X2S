@@ -36,5 +36,6 @@ int parse_form_field(const char *body, const char *field, char *out,
                             size_t out_size);
 void get_user_from_request(struct MHD_Connection *conn, User *user,
                                   TokenStore *tokens);
+int read_object_file(ObjectStore *store, const unsigned char id[32], Object *out);
 
 #endif

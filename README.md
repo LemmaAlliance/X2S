@@ -17,11 +17,12 @@ cmake -S . -B build && cmake --build build
 ```
 
 ```
-Listening on [http://0.0.0.0:8080](http://0.0.0.0:8080)
+Listening on http://0.0.0.0:8080
   POST  /auth/register      register a new user
   POST  /auth/login          authenticate and get a token
   POST  /auth/logout         invalidate a token
   POST  /objects             upload an object
+  GET   /objects             list accessible objects with filters
   GET   /objects/<id>        retrieve an object
   DELETE /objects/<id>       remove an object
   POST  /objects/<id>/share  grant object permissions to another user
@@ -69,8 +70,15 @@ X2S employs a **Content-Addressable Storage (CAS)** paradigm where file contents
 curl -X POST http://localhost:8080/objects \
   -H 'Authorization: Bearer <token>' \
   -H 'X-Filename: hello.txt' \
+  -H 'X-Category: documents' \
+  -H 'X-Extension: txt' \
   -d 'Hello, World!'
 # → {"id":"63a46a45f4bcc89a04adfefccdfdbb5b66a659d92cb54dd2bdb4e1705d06996a"}
+
+# list all files you have access to (with optional query filters)
+curl -H 'Authorization: Bearer <token>' \
+  "http://localhost:8080/objects?category=documents&extension=txt"
+# → {"objects":[{"id":"63a46a45...","category":"documents","filename":"hello.txt","extension":"txt","size":13}]}
 
 # download
 curl -H 'Authorization: Bearer <token>' \
@@ -86,6 +94,16 @@ curl -X DELETE -H 'Authorization: Bearer <token>' \
   http://localhost:8080/objects/63a46a45f4bcc89a04adfefccdfdbb5b66a659d92cb54dd2bdb4e1705d06996a
 
 ```
+
+#### Listing & Filtering (`GET /objects`)
+
+Returns a JSON collection of all object tracking wrappers that the authenticated user has explicit read access (`PERM_READ`) to view.
+
+You can filter results by appending optional URL query strings:
+
+* `category`: Filters items by exact string equality against their `X-Category` metadata properties.
+* `filename`: Filters items by exact string equality against their original `X-Filename` properties.
+* `extension`: Filters items by exact string equality against their `X-Extension` metadata properties.
 
 #### Reference-Checked Deletion (`DELETE /objects/<id>`)
 
@@ -111,9 +129,9 @@ Allows the object **owner** to append or update access permissions for a specifi
 
 | Header | Description |
 | --- | --- |
-| `X-Category` | Arbitrary category tag |
-| `X-Extension` | File extension (no dot); used for `Content-Type` on download |
-| `X-Filename` | Original filename |
+| `X-Category` | Arbitrary category tag used for indexing and filtering discovery results |
+| `X-Extension` | File extension (no dot); used for query filtering and evaluating `Content-Type` on download |
+| `X-Filename` | Original filename string used for filtering discovery lists |
 
 ## Error responses
 
@@ -126,6 +144,7 @@ All errors return JSON:
 
 | Status | Meaning |
 | --- | --- |
+| 200 | Success (returns data array or file payload stream) |
 | 201 | Object created |
 | 204 | Success (no body) |
 | 400 | Bad request / Missing parameter fields |
@@ -173,8 +192,9 @@ cmake -S . -B build && cmake --build build
 ## Design notes
 
 * **Single-threaded** — libmicrohttpd internal polling thread handles all I/O. No locking, no concurrent access safety.
-* **No TLS** — intended for trusted/internal networks.**It is highly recommended to pair this with a reverse proxy like Nginx**
+* **No TLS** — intended for trusted/internal networks. **It is highly recommended to pair this with a reverse proxy like Nginx**
 * **Content-addressed & Deduplicated** — payload contents are identified via unique data hashes. Multiple metadata targets reference identical chunks on disk, achieving file deduplication across users while preserving access control sandboxing.
+* **Metadata query discovery** — indexes user spaces globally in real-time by crawling local hash-node buckets to enforce precise sandbox filtering constraints quickly.
 * **Constant-time comparisons** — password hashes and session tokens are compared with `CRYPTO_memcmp` to mitigate timing attacks.
 * **No session expiry** — bearer tokens live until server restart. Re-authentication is required after restart. (This is a future feature)
 * **Maximum password length** — 1024 bytes.
