@@ -10,10 +10,56 @@
 #include <string.h>
 #include <strings.h>
 
+/* Note: The full definition of struct ApiServer is defined in api_helpers.h,
+   but we just need to ensure your api_helpers.h definition includes:
+   const char *cors_origin;
+   If it doesn't, add "const char *cors_origin;" inside the struct in api_helpers.h! */
+
+/* -------------------------------------------------------------------------
+ * CORS support
+ * ---------------------------------------------------------------------- */
+
+#define CORS_METHODS "GET, POST, DELETE, OPTIONS"
+#define CORS_HEADERS "Authorization, Content-Type, X-Filename, X-Category, X-Extension"
+
+/*
+ * Attach CORS headers dynamically based on the configured server origin.
+ */
+static void add_cors_headers(struct MHD_Response *resp, const char *cors_origin) {
+  MHD_add_response_header(resp, "Access-Control-Allow-Origin",  cors_origin ? cors_origin : "*");
+  MHD_add_response_header(resp, "Access-Control-Allow-Methods", CORS_METHODS);
+  MHD_add_response_header(resp, "Access-Control-Allow-Headers", CORS_HEADERS);
+}
+
+/*
+ * Dynamic error response with CORS support.
+ */
+static enum MHD_Result send_error_cors(struct MHD_Connection *conn, const char *cors_origin,
+                                       unsigned int status, const char *msg) {
+  size_t msg_len = strlen(msg);
+  size_t json_len = msg_len + 12;
+  char *json = malloc(json_len + 1);
+  if (!json)
+    return MHD_NO;
+  snprintf(json, json_len + 1, "{\"error\":\"%s\"}", msg);
+
+  struct MHD_Response *resp = MHD_create_response_from_buffer(
+      strlen(json), json, MHD_RESPMEM_MUST_FREE);
+  if (!resp) {
+    free(json);
+    return MHD_NO;
+  }
+
+  MHD_add_response_header(resp, "Content-Type", "application/json");
+  add_cors_headers(resp, cors_origin);
+  enum MHD_Result ret = MHD_queue_response(conn, status, resp);
+  MHD_destroy_response(resp);
+  return ret;
+}
+
 /* -------------------------------------------------------------------------
  * Route handlers
  * ---------------------------------------------------------------------- */
-
 /*
  * PUT /objects
  *
@@ -41,7 +87,7 @@ static enum MHD_Result handle_put(struct MHD_Connection *conn,
     size_t incoming = *upload_data_size;
 
     if (ub->len + incoming > MAX_UPLOAD_SIZE)
-      return send_error(conn, MHD_HTTP_CONTENT_TOO_LARGE,
+      return send_error_cors(conn, server->cors_origin, MHD_HTTP_CONTENT_TOO_LARGE,
                         "body exceeds 64 MiB limit");
 
     /* Grow buffer if needed */
@@ -62,21 +108,17 @@ static enum MHD_Result handle_put(struct MHD_Connection *conn,
     return MHD_YES;
   }
 
-  /* Final call — upload_data_size == 0, process the complete body */
   if (ub->len == 0)
-    return send_error(conn, MHD_HTTP_BAD_REQUEST, "empty body");
+    return send_error_cors(conn, server->cors_origin, MHD_HTTP_BAD_REQUEST, "empty body");
 
-  /* Read optional metadata headers */
-  const char *category =
-      MHD_lookup_connection_value(conn, MHD_HEADER_KIND, "X-Category");
-  const char *extension =
-      MHD_lookup_connection_value(conn, MHD_HEADER_KIND, "X-Extension");
-  const char *filename =
-      MHD_lookup_connection_value(conn, MHD_HEADER_KIND, "X-Filename");
+    /* Read optional metadata headers */
+  const char *category = MHD_lookup_connection_value(conn, MHD_HEADER_KIND, "X-Category");
+  const char *extension = MHD_lookup_connection_value(conn, MHD_HEADER_KIND, "X-Extension");
+  const char *filename = MHD_lookup_connection_value(conn, MHD_HEADER_KIND, "X-Filename");
 
   Metadata meta = {
-      .category = (char *)category,   /* cast away const — put_object */
-      .extension = (char *)extension, /* only reads these pointers    */
+      .category = (char *)category,
+      .extension = (char *)extension,
       .filename = (char *)filename,
   };
 
@@ -89,11 +131,11 @@ static enum MHD_Result handle_put(struct MHD_Connection *conn,
   get_user_from_request(conn, &user, server->tokens);
 
   if (!put_object(server->store, &user, &obj))
-    return send_error(conn, MHD_HTTP_INTERNAL_SERVER_ERROR,
+    return send_error_cors(conn, server->cors_origin, MHD_HTTP_INTERNAL_SERVER_ERROR,
                       "failed to store object");
 
-  /* Build response: {"id":"<64 hex chars>"} */
-  char json[80]; /* {"id":"" + 64 chars + "}"} = 73 bytes */
+  /* Build response: {"id":"<64 hex chars>"}*/
+  char json[80];
   snprintf(json, sizeof(json), "{\"id\":\"");
   for (int i = 0; i < 32; i++)
     snprintf(json + 7 + i * 2, 3, "%02x", obj.id[i]);
@@ -113,6 +155,7 @@ static enum MHD_Result handle_put(struct MHD_Connection *conn,
   }
 
   MHD_add_response_header(resp, "Content-Type", "application/json");
+  add_cors_headers(resp, server->cors_origin);
   enum MHD_Result ret = MHD_queue_response(conn, MHD_HTTP_CREATED, resp);
   MHD_destroy_response(resp);
   return ret;
@@ -125,47 +168,38 @@ static enum MHD_Result handle_get(struct MHD_Connection *conn,
                                   ApiServer *server, const char *hex_id) {
   unsigned char id[32];
   if (!parse_hex_id(hex_id, id))
-    return send_error(conn, MHD_HTTP_BAD_REQUEST, "invalid object id");
+    return send_error_cors(conn, server->cors_origin, MHD_HTTP_BAD_REQUEST, "invalid object id");
 
   User user;
   get_user_from_request(conn, &user, server->tokens);
 
-  int perm =
-      check_object_permission(server->store, id, user.user_id, PERM_READ);
+  int perm = check_object_permission(server->store, id, user.user_id, PERM_READ);
   if (perm == -1)
-    return send_error(conn, MHD_HTTP_NOT_FOUND, "object not found");
+    return send_error_cors(conn, server->cors_origin, MHD_HTTP_NOT_FOUND, "object not found");
   if (perm == 0)
-    return send_error(conn, MHD_HTTP_FORBIDDEN, "access denied");
+    return send_error_cors(conn, server->cors_origin, MHD_HTTP_FORBIDDEN, "access denied");
 
   Object *obj = get_object(server->store, &user, id);
   if (!obj)
-    return send_error(conn, MHD_HTTP_NOT_FOUND, "object not found");
+    return send_error_cors(conn, server->cors_origin, MHD_HTTP_NOT_FOUND, "object not found");
 
-  /* obj->data is heap-allocated by get_object; pass ownership to MHD */
   struct MHD_Response *resp = MHD_create_response_from_buffer(
       obj->size, obj->data, MHD_RESPMEM_MUST_FREE);
   if (!resp) {
     free(obj->data);
-    if (obj->acl) {
-      free(obj->acl->entries);
-      free(obj->acl);
-    }
+    if (obj->acl) { free(obj->acl->entries); free(obj->acl); }
     free_metadata(obj->metadata);
     free(obj);
     return MHD_NO;
   }
 
-  /* obj->data now owned by MHD; free the rest ourselves */
-  const char *mime =
-      mime_for_extension(obj->metadata ? obj->metadata->extension : NULL);
+  const char *mime = mime_for_extension(obj->metadata ? obj->metadata->extension : NULL);
   MHD_add_response_header(resp, "Content-Type", mime);
+  add_cors_headers(resp, server->cors_origin);
 
-  if (obj->acl) {
-    free(obj->acl->entries);
-    free(obj->acl);
-  }
+  if (obj->acl) { free(obj->acl->entries); free(obj->acl); }
   free_metadata(obj->metadata);
-  free(obj); /* data already handed off; do NOT free(obj->data) here */
+  free(obj);
 
   enum MHD_Result ret = MHD_queue_response(conn, MHD_HTTP_OK, resp);
   MHD_destroy_response(resp);
@@ -179,27 +213,25 @@ static enum MHD_Result handle_delete(struct MHD_Connection *conn,
                                      ApiServer *server, const char *hex_id) {
   unsigned char id[32];
   if (!parse_hex_id(hex_id, id))
-    return send_error(conn, MHD_HTTP_BAD_REQUEST, "invalid object id");
+    return send_error_cors(conn, server->cors_origin, MHD_HTTP_BAD_REQUEST, "invalid object id");
 
   User user;
   get_user_from_request(conn, &user, server->tokens);
 
-  int perm =
-      check_object_permission(server->store, id, user.user_id, PERM_DELETE);
+  int perm = check_object_permission(server->store, id, user.user_id, PERM_DELETE);
   if (perm == -1)
-    return send_error(conn, MHD_HTTP_NOT_FOUND, "object not found");
+    return send_error_cors(conn, server->cors_origin, MHD_HTTP_NOT_FOUND, "object not found");
   if (perm == 0)
-    return send_error(conn, MHD_HTTP_FORBIDDEN, "access denied");
+    return send_error_cors(conn, server->cors_origin, MHD_HTTP_FORBIDDEN, "access denied");
 
   if (!remove_object(server->store, &user, id))
-    return send_error(conn, MHD_HTTP_NOT_FOUND, "object not found");
+    return send_error_cors(conn, server->cors_origin, MHD_HTTP_NOT_FOUND, "object not found");
 
-  /* 204 No Content — no body */
-  struct MHD_Response *resp =
-      MHD_create_response_from_buffer(0, NULL, MHD_RESPMEM_PERSISTENT);
+  struct MHD_Response *resp = MHD_create_response_from_buffer(0, NULL, MHD_RESPMEM_PERSISTENT);
   if (!resp)
     return MHD_NO;
 
+  add_cors_headers(resp, server->cors_origin);
   enum MHD_Result ret = MHD_queue_response(conn, MHD_HTTP_NO_CONTENT, resp);
   MHD_destroy_response(resp);
   return ret;
@@ -209,17 +241,15 @@ static enum MHD_Result handle_list_objects(struct MHD_Connection *conn, ApiServe
     User user;
     get_user_from_request(conn, &user, server->tokens);
 
-    // Extract optional query parameters
     const char *category = MHD_lookup_connection_value(conn, MHD_GET_ARGUMENT_KIND, "category");
     const char *filename = MHD_lookup_connection_value(conn, MHD_GET_ARGUMENT_KIND, "filename");
-    const char *extension = MHD_lookup_connection_value(conn, MHD_GET_ARGUMENT_KIND, "extension"); // NEW
+    const char *extension = MHD_lookup_connection_value(conn, MHD_GET_ARGUMENT_KIND, "extension");
 
     Object **objects = NULL;
     size_t count = 0;
 
-    // Pass the extension query string argument down into the logic routine
     if (!list_user_objects(server->store, &user, category, filename, extension, &objects, &count)) {
-        return send_error(conn, MHD_HTTP_INTERNAL_SERVER_ERROR, "failed to read index files");
+        return send_error_cors(conn, server->cors_origin, MHD_HTTP_INTERNAL_SERVER_ERROR, "failed to read index files");
     }
 
     size_t json_cap = 1024;
@@ -246,9 +276,8 @@ static enum MHD_Result handle_list_objects(struct MHD_Connection *conn, ApiServe
 
         const char *obj_cat = (objects[i]->metadata && objects[i]->metadata->category) ? objects[i]->metadata->category : "";
         const char *obj_fn = (objects[i]->metadata && objects[i]->metadata->filename) ? objects[i]->metadata->filename : "";
-        const char *obj_ext = (objects[i]->metadata && objects[i]->metadata->extension) ? objects[i]->metadata->extension : ""; // NEW
+        const char *obj_ext = (objects[i]->metadata && objects[i]->metadata->extension) ? objects[i]->metadata->extension : "";
 
-        // Allocate a buffer space that safely accommodates the addition of the extension property
         size_t needed = strlen(hex_id) + strlen(obj_cat) + strlen(obj_fn) + strlen(obj_ext) + 160;
 
         if (json_len + needed >= json_cap) {
@@ -268,8 +297,8 @@ static enum MHD_Result handle_list_objects(struct MHD_Connection *conn, ApiServe
             json = tmp;
         }
 
-        // Output format now tracks the extension key:
-        // {"id":"...","category":"...","filename":"...","extension":"...","size":123}
+        /* Output format now tracks the extension key:
+        {"id":"...","category":"...","filename":"...","extension":"...","size":123} */
         size_t written = snprintf(json + json_len, json_cap - json_len,
             "%s{\"id\":\"%s\",\"category\":\"%s\",\"filename\":\"%s\",\"extension\":\"%s\",\"size\":%zu}",
             (i > 0) ? "," : "", hex_id, obj_cat, obj_fn, obj_ext, objects[i]->size);
@@ -295,6 +324,7 @@ static enum MHD_Result handle_list_objects(struct MHD_Connection *conn, ApiServe
     }
 
     MHD_add_response_header(resp, "Content-Type", "application/json");
+    add_cors_headers(resp, server->cors_origin);
     enum MHD_Result ret = MHD_queue_response(conn, MHD_HTTP_OK, resp);
     MHD_destroy_response(resp);
     return ret;
@@ -326,7 +356,7 @@ static enum MHD_Result handle_auth_register(struct MHD_Connection *conn,
   if (*upload_data_size > 0) {
     size_t incoming = *upload_data_size;
     if (ub->len + incoming > 4096)
-      return send_error(conn, MHD_HTTP_BAD_REQUEST, "body too large");
+      return send_error_cors(conn, server->cors_origin, MHD_HTTP_BAD_REQUEST, "body too large");
 
     if (ub->len + incoming > ub->cap) {
       size_t new_cap = (ub->cap == 0) ? incoming : ub->cap;
@@ -346,33 +376,33 @@ static enum MHD_Result handle_auth_register(struct MHD_Connection *conn,
   }
 
   if (ub->len == 0)
-    return send_error(conn, MHD_HTTP_BAD_REQUEST, "empty body");
+    return send_error_cors(conn, server->cors_origin, MHD_HTTP_BAD_REQUEST, "empty body");
 
   char username[64] = {0};
   char password[256] = {0};
 
   if (!parse_form_field(ub->buf, "username", username, sizeof(username)) ||
       !parse_form_field(ub->buf, "password", password, sizeof(password)))
-    return send_error(conn, MHD_HTTP_BAD_REQUEST,
+    return send_error_cors(conn, server->cors_origin, MHD_HTTP_BAD_REQUEST,
                       "missing username or password");
 
   if (strlen(username) == 0 || strlen(password) == 0)
-    return send_error(conn, MHD_HTTP_BAD_REQUEST,
+    return send_error_cors(conn, server->cors_origin, MHD_HTTP_BAD_REQUEST,
                       "username and password required");
 
   unsigned char user_id[16];
   if (!user_store_register(server->tokens->users, username, password, user_id))
-    return send_error(conn, MHD_HTTP_CONFLICT,
+    return send_error_cors(conn, server->cors_origin, MHD_HTTP_CONFLICT,
                       "username already taken or invalid");
 
   char *token_hex = session_create(server->tokens->sessions, user_id);
   if (!token_hex)
-    return send_error(conn, MHD_HTTP_INTERNAL_SERVER_ERROR,
+    return send_error_cors(conn, server->cors_origin, MHD_HTTP_INTERNAL_SERVER_ERROR,
                       "failed to create session");
 
   if (!user_store_save(server->tokens->users, server->store->store_path)) {
     free(token_hex);
-    return send_error(conn, MHD_HTTP_INTERNAL_SERVER_ERROR,
+    return send_error_cors(conn, server->cors_origin, MHD_HTTP_INTERNAL_SERVER_ERROR,
                       "failed to persist users");
   }
 
@@ -398,6 +428,7 @@ static enum MHD_Result handle_auth_register(struct MHD_Connection *conn,
   }
 
   MHD_add_response_header(resp, "Content-Type", "application/json");
+  add_cors_headers(resp, server->cors_origin);
   enum MHD_Result ret = MHD_queue_response(conn, MHD_HTTP_CREATED, resp);
   MHD_destroy_response(resp);
   return ret;
@@ -421,7 +452,7 @@ static enum MHD_Result handle_auth_login(struct MHD_Connection *conn,
   if (*upload_data_size > 0) {
     size_t incoming = *upload_data_size;
     if (ub->len + incoming > 4096)
-      return send_error(conn, MHD_HTTP_BAD_REQUEST, "body too large");
+      return send_error_cors(conn, server->cors_origin, MHD_HTTP_BAD_REQUEST, "body too large");
 
     if (ub->len + incoming > ub->cap) {
       size_t new_cap = (ub->cap == 0) ? incoming : ub->cap;
@@ -441,25 +472,24 @@ static enum MHD_Result handle_auth_login(struct MHD_Connection *conn,
   }
 
   if (ub->len == 0)
-    return send_error(conn, MHD_HTTP_BAD_REQUEST, "empty body");
+    return send_error_cors(conn, server->cors_origin, MHD_HTTP_BAD_REQUEST, "empty body");
 
   char username[64] = {0};
   char password[256] = {0};
 
   if (!parse_form_field(ub->buf, "username", username, sizeof(username)) ||
       !parse_form_field(ub->buf, "password", password, sizeof(password)))
-    return send_error(conn, MHD_HTTP_BAD_REQUEST,
+    return send_error_cors(conn, server->cors_origin, MHD_HTTP_BAD_REQUEST,
                       "missing username or password");
 
   unsigned char user_id[16];
-  if (!user_store_authenticate(server->tokens->users, username, password,
-                               user_id))
-    return send_error(conn, MHD_HTTP_UNAUTHORIZED,
+  if (!user_store_authenticate(server->tokens->users, username, password, user_id))
+    return send_error_cors(conn, server->cors_origin, MHD_HTTP_UNAUTHORIZED,
                       "invalid username or password");
 
   char *token_hex = session_create(server->tokens->sessions, user_id);
   if (!token_hex)
-    return send_error(conn, MHD_HTTP_INTERNAL_SERVER_ERROR,
+    return send_error_cors(conn, server->cors_origin, MHD_HTTP_INTERNAL_SERVER_ERROR,
                       "failed to create session");
 
   char user_id_hex[33] = {0};
@@ -484,6 +514,7 @@ static enum MHD_Result handle_auth_login(struct MHD_Connection *conn,
   }
 
   MHD_add_response_header(resp, "Content-Type", "application/json");
+  add_cors_headers(resp, server->cors_origin);
   enum MHD_Result ret = MHD_queue_response(conn, MHD_HTTP_OK, resp);
   MHD_destroy_response(resp);
   return ret;
@@ -491,37 +522,34 @@ static enum MHD_Result handle_auth_login(struct MHD_Connection *conn,
 
 static enum MHD_Result handle_auth_logout(struct MHD_Connection *conn,
                                           ApiServer *server) {
-  const char *auth =
-      MHD_lookup_connection_value(conn, MHD_HEADER_KIND, "Authorization");
+  const char *auth = MHD_lookup_connection_value(conn, MHD_HEADER_KIND, "Authorization");
   if (!auth || strncmp(auth, "Bearer ", 7) != 0)
-    return send_error(conn, MHD_HTTP_UNAUTHORIZED, "missing bearer token");
+    return send_error_cors(conn, server->cors_origin, MHD_HTTP_UNAUTHORIZED, "missing bearer token");
 
   const char *hex_token = auth + 7;
   if (strlen(hex_token) != TOKEN_SIZE * 2)
-    return send_error(conn, MHD_HTTP_UNAUTHORIZED, "invalid token");
+    return send_error_cors(conn, server->cors_origin, MHD_HTTP_UNAUTHORIZED, "invalid token");
 
   unsigned char token_bin[TOKEN_SIZE];
   if (!hex_to_bytes(hex_token, token_bin, TOKEN_SIZE))
-    return send_error(conn, MHD_HTTP_UNAUTHORIZED, "invalid token");
+    return send_error_cors(conn, server->cors_origin, MHD_HTTP_UNAUTHORIZED, "invalid token");
 
   session_destroy(server->tokens->sessions, token_bin);
 
-  struct MHD_Response *resp =
-      MHD_create_response_from_buffer(0, NULL, MHD_RESPMEM_PERSISTENT);
+  struct MHD_Response *resp = MHD_create_response_from_buffer(0, NULL, MHD_RESPMEM_PERSISTENT);
   if (!resp)
     return MHD_NO;
 
+  add_cors_headers(resp, server->cors_origin);
   enum MHD_Result ret = MHD_queue_response(conn, MHD_HTTP_NO_CONTENT, resp);
   MHD_destroy_response(resp);
   return ret;
 }
 
-
 static enum MHD_Result handle_share(struct MHD_Connection *conn,
                                    ApiServer *server, const char *hex_id,
                                    const char *upload_data,
                                    size_t *upload_data_size, void **con_cls) {
-  /* Step 1: Accumulate request payload body chunks */
   if (!*con_cls) {
     UploadBuffer *ub = calloc(1, sizeof(UploadBuffer));
     if (!ub) return MHD_NO;
@@ -534,7 +562,7 @@ static enum MHD_Result handle_share(struct MHD_Connection *conn,
   if (*upload_data_size > 0) {
     size_t incoming = *upload_data_size;
     if (ub->len + incoming > 4096)
-      return send_error(conn, MHD_HTTP_BAD_REQUEST, "body too large");
+      return send_error_cors(conn, server->cors_origin, MHD_HTTP_BAD_REQUEST, "body too large");
 
     if (ub->len + incoming > ub->cap) {
       size_t new_cap = (ub->cap == 0) ? incoming : ub->cap;
@@ -552,46 +580,42 @@ static enum MHD_Result handle_share(struct MHD_Connection *conn,
   }
 
   if (ub->len == 0)
-    return send_error(conn, MHD_HTTP_BAD_REQUEST, "empty body");
+    return send_error_cors(conn, server->cors_origin, MHD_HTTP_BAD_REQUEST, "empty body");
 
-  /* Step 2: Validate Target Resource ID */
   unsigned char id[32];
   if (!parse_hex_id(hex_id, id))
-    return send_error(conn, MHD_HTTP_BAD_REQUEST, "invalid object id");
+    return send_error_cors(conn, server->cors_origin, MHD_HTTP_BAD_REQUEST, "invalid object id");
 
-  /* Step 3: Extract the requester user session context details */
   User user;
   get_user_from_request(conn, &user, server->tokens);
 
-  /* Step 4: Parse required parameter values out of form body */
   char target_uid_hex[33] = {0};
   char perm_str[16] = {0};
 
   if (!parse_form_field(ub->buf, "user_id", target_uid_hex, sizeof(target_uid_hex)) ||
       !parse_form_field(ub->buf, "permissions", perm_str, sizeof(perm_str))) {
-    return send_error(conn, MHD_HTTP_BAD_REQUEST, "missing user_id or permissions");
+    return send_error_cors(conn, server->cors_origin, MHD_HTTP_BAD_REQUEST, "missing user_id or permissions");
   }
 
   unsigned char target_uid_bin[16];
   if (!hex_to_bytes(target_uid_hex, target_uid_bin, 16)) {
-    return send_error(conn, MHD_HTTP_BAD_REQUEST, "invalid target user_id format");
+    return send_error_cors(conn, server->cors_origin, MHD_HTTP_BAD_REQUEST, "invalid target user_id format");
   }
 
   uint32_t permissions = (uint32_t)strtoul(perm_str, NULL, 10);
 
-  /* Step 5: Route request directly downward to core data storage interface execution logic */
   int res = share_object(server->store, &user, id, target_uid_bin, permissions);
   if (res == -1)
-    return send_error(conn, MHD_HTTP_NOT_FOUND, "object not found");
+    return send_error_cors(conn, server->cors_origin, MHD_HTTP_NOT_FOUND, "object not found");
   if (res == -2)
-    return send_error(conn, MHD_HTTP_FORBIDDEN, "only the owner can share this object");
+    return send_error_cors(conn, server->cors_origin, MHD_HTTP_FORBIDDEN, "only the owner can share this object");
   if (res == 0)
-    return send_error(conn, MHD_HTTP_INTERNAL_SERVER_ERROR, "failed to update permissions");
+    return send_error_cors(conn, server->cors_origin, MHD_HTTP_INTERNAL_SERVER_ERROR, "failed to update permissions");
 
-  /* Step 6: Respond back with empty HTTP 204 status confirmation on successful completion */
   struct MHD_Response *resp = MHD_create_response_from_buffer(0, NULL, MHD_RESPMEM_PERSISTENT);
   if (!resp) return MHD_NO;
 
+  add_cors_headers(resp, server->cors_origin);
   enum MHD_Result ret = MHD_queue_response(conn, MHD_HTTP_NO_CONTENT, resp);
   MHD_destroy_response(resp);
   return ret;
@@ -605,9 +629,19 @@ static enum MHD_Result
 access_handler(void *cls, struct MHD_Connection *conn, const char *url,
                const char *method, const char *version, const char *upload_data,
                size_t *upload_data_size, void **con_cls) {
-  (void)version; /* unused */
+  (void)version;
 
   ApiServer *server = cls;
+
+  if (strcmp(method, "OPTIONS") == 0) {
+    struct MHD_Response *resp = MHD_create_response_from_buffer(0, NULL, MHD_RESPMEM_PERSISTENT);
+    if (!resp)
+      return MHD_NO;
+    add_cors_headers(resp, server->cors_origin);
+    enum MHD_Result ret = MHD_queue_response(conn, MHD_HTTP_NO_CONTENT, resp);
+    MHD_destroy_response(resp);
+    return ret;
+  }
 
   /*
    * Route: /auth/register   → POST only
@@ -618,24 +652,22 @@ access_handler(void *cls, struct MHD_Connection *conn, const char *url,
    */
   if (strcmp(url, "/auth/register") == 0) {
     if (strcmp(method, "POST") == 0)
-      return handle_auth_register(conn, server, upload_data, upload_data_size,
-                                  con_cls);
-    return send_error(conn, MHD_HTTP_METHOD_NOT_ALLOWED,
+      return handle_auth_register(conn, server, upload_data, upload_data_size, con_cls);
+    return send_error_cors(conn, server->cors_origin, MHD_HTTP_METHOD_NOT_ALLOWED,
                       "only POST is accepted on /auth/register");
   }
 
   if (strcmp(url, "/auth/login") == 0) {
     if (strcmp(method, "POST") == 0)
-      return handle_auth_login(conn, server, upload_data, upload_data_size,
-                               con_cls);
-    return send_error(conn, MHD_HTTP_METHOD_NOT_ALLOWED,
+      return handle_auth_login(conn, server, upload_data, upload_data_size, con_cls);
+    return send_error_cors(conn, server->cors_origin, MHD_HTTP_METHOD_NOT_ALLOWED,
                       "only POST is accepted on /auth/login");
   }
 
   if (strcmp(url, "/auth/logout") == 0) {
     if (strcmp(method, "POST") == 0)
       return handle_auth_logout(conn, server);
-    return send_error(conn, MHD_HTTP_METHOD_NOT_ALLOWED,
+    return send_error_cors(conn, server->cors_origin, MHD_HTTP_METHOD_NOT_ALLOWED,
                       "only POST is accepted on /auth/logout");
   }
 
@@ -646,15 +678,13 @@ access_handler(void *cls, struct MHD_Connection *conn, const char *url,
     if (strcmp(method, "GET") == 0) {
       return handle_list_objects(conn, server);
     }
-    return send_error(conn, MHD_HTTP_METHOD_NOT_ALLOWED,
+    return send_error_cors(conn, server->cors_origin, MHD_HTTP_METHOD_NOT_ALLOWED,
                       "only POST and GET are accepted on /objects");
   }
 
   /* Prefix match: /objects/<id> & /objects/<id>/share*/
   if (strncmp(url, "/objects/", 9) == 0) {
     const char *hex_id = url + 9;
-    
-    // Check if the URL string has a trailing /share substring mapping
     size_t id_len = strlen(hex_id);
     int is_share_route = 0;
     char extracted_id[65] = {0};
@@ -674,12 +704,11 @@ access_handler(void *cls, struct MHD_Connection *conn, const char *url,
       if (strcmp(method, "POST") == 0) {
         return handle_share(conn, server, extracted_id, upload_data, upload_data_size, con_cls);
       }
-      return send_error(conn, MHD_HTTP_METHOD_NOT_ALLOWED, "only POST is accepted on /objects/<id>/share");
+      return send_error_cors(conn, server->cors_origin, MHD_HTTP_METHOD_NOT_ALLOWED, "only POST is accepted on /objects/<id>/share");
     }
 
-    /* Initialise con_cls for the first call on standard non-POST/non-PUT routes */
     if (!*con_cls) {
-      *con_cls = (void *)1; /* sentinel — no buffer needed */
+      *con_cls = (void *)1;
       return MHD_YES;
     }
 
@@ -688,11 +717,11 @@ access_handler(void *cls, struct MHD_Connection *conn, const char *url,
     if (strcmp(method, "DELETE") == 0)
       return handle_delete(conn, server, extracted_id);
 
-    return send_error(conn, MHD_HTTP_METHOD_NOT_ALLOWED,
+    return send_error_cors(conn, server->cors_origin, MHD_HTTP_METHOD_NOT_ALLOWED,
                       "only GET and DELETE are accepted on /objects/<id>");
   }
 
-  return send_error(conn, MHD_HTTP_NOT_FOUND, "unknown route");
+  return send_error_cors(conn, server->cors_origin, MHD_HTTP_NOT_FOUND, "unknown route");
 }
 
 /* -------------------------------------------------------------------------
@@ -728,7 +757,7 @@ static void request_completed(void *cls, struct MHD_Connection *conn,
  * Public API
  * ---------------------------------------------------------------------- */
 
-ApiServer *api_server_start(unsigned int port, ObjectStore *store,
+ApiServer *api_server_start(unsigned int port, const char *cors_origin, ObjectStore *store,
                             TokenStore *tokens) {
   if (!store)
     return NULL;
@@ -739,6 +768,7 @@ ApiServer *api_server_start(unsigned int port, ObjectStore *store,
 
   server->store = store;
   server->tokens = tokens;
+  server->cors_origin = cors_origin; /* Track dynamic value safely here */
 
   /*
    * MHD_USE_INTERNAL_POLLING_THREAD: MHD manages its own thread so
@@ -747,10 +777,10 @@ ApiServer *api_server_start(unsigned int port, ObjectStore *store,
    */
   server->daemon = MHD_start_daemon(
       MHD_USE_INTERNAL_POLLING_THREAD | MHD_USE_ERROR_LOG, (uint16_t)port, NULL,
-      NULL,                   /* accept policy callback — allow all */
-      access_handler, server, /* request handler + closure          */
+      NULL,
+      access_handler, server,
       MHD_OPTION_NOTIFY_COMPLETED, request_completed,
-      NULL, /* cleanup callback                   */
+      NULL,
       MHD_OPTION_END);
 
   if (!server->daemon) {

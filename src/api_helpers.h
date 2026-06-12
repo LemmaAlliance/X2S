@@ -15,6 +15,7 @@ struct ApiServer {
   struct MHD_Daemon *daemon;
   ObjectStore *store;
   TokenStore *tokens;
+  const char *cors_origin;
 };
 
 /*

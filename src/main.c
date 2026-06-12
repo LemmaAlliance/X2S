@@ -7,6 +7,7 @@
 #include <unistd.h>
 
 #define DEFAULT_PORT 8080
+#define DEFAULT_CORS "*"
 
 static volatile int running = 1;
 
@@ -17,8 +18,23 @@ static void handle_sigint(int sig) {
 
 int main(int argc, char *argv[]) {
   unsigned int port = DEFAULT_PORT;
-  if (argc == 2)
-    port = (unsigned int)atoi(argv[1]);
+  char *cors_origin = DEFAULT_CORS;
+  int opt;
+
+  // Process standard switch options cleanly
+  while ((opt = getopt(argc, argv, "p:c:")) != -1) {
+    switch (opt) {
+      case 'p':
+        port = (unsigned int)atoi(optarg);
+        break;
+      case 'c':
+        cors_origin = optarg;
+        break;
+      default:
+        fprintf(stderr, "Usage: %s [-p port] [-c cors_origin]\n", argv[0]);
+        return 1;
+    }
+  }
 
   printf("Welcome to X2S — eXtremely Simple Storage\n");
 
@@ -47,7 +63,8 @@ int main(int argc, char *argv[]) {
 
   TokenStore tokens = {.users = users, .sessions = sessions};
 
-  ApiServer *api = api_server_start(port, store, &tokens);
+  // Pass dynamic port configuration alongside the custom string assignment down safely
+  ApiServer *api = api_server_start(port, cors_origin, store, &tokens);
   if (!api) {
     fprintf(stderr, "Failed to start API server on port %u\n", port);
     session_store_free(sessions);
@@ -57,6 +74,7 @@ int main(int argc, char *argv[]) {
   }
 
   printf("Listening on http://0.0.0.0:%u\n", port);
+  printf("Allowed CORS Origin: %s\n", cors_origin);
   printf("  POST  /auth/register      register a new user\n");
   printf("  POST  /auth/login          authenticate and get a token\n");
   printf("  POST  /auth/logout         invalidate a token\n");

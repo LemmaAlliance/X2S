@@ -48,18 +48,12 @@
 typedef struct ApiServer ApiServer;
 
 /*
- * Create and start the HTTP server on the given port.
- * The server takes references to an existing ObjectStore, UserStore, and
- * SessionStore; it does not own them and will not free them.
- *
- * Returns NULL on failure (port in use, memory error, etc.).
+ * Create and start the HTTP server on the given port and with the specified CORS origin.
  */
-ApiServer *api_server_start(unsigned int port, ObjectStore *store,
-                            TokenStore *tokens);
+ApiServer *api_server_start(unsigned int port, const char *cors_origin, ObjectStore *store, TokenStore *tokens);
 
 /*
- * Stop the server and free all resources. Blocks until the internal
- * polling thread has shut down. Does not free the ObjectStore.
+ * Stop the server and free all resources.
  */
 void api_server_stop(ApiServer *server);
 
