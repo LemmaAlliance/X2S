@@ -37,7 +37,7 @@ jobs:
                 RESPONSE=$(curl -s -f -X POST http://localhost:8080/auth/register -d 'username=alice&password=foobar')
 
                 TOKEN=$(echo "$RESPONSE" | jq -r '.token')
-                echo "$TOKEN" >> $GITHUB_OUTPUT
+                echo "auth_token=$TOKEN" >> $GITHUB_OUTPUT
             
             - name: Return Token
               run: |
@@ -52,7 +52,7 @@ jobs:
                 -H 'X-Extension: txt' \
                 -d 'Hello, World!')
 
-                echo "$RESPONSE" >> $GITHUB_OUTPUT
+                echo "response=$RESPONSE" >> $GITHUB_OUTPUT
             
             - name: List owned objects
               run: |
