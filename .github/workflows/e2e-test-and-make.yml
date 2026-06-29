@@ -42,6 +42,7 @@ jobs:
             - name: Return Token
               run: |
                 echo "The token is: ${{ steps.create_account.outputs.auth_token }}"
+
             - name: Upload object
               id: upload_object
               run: |
@@ -67,3 +68,19 @@ jobs:
                     echo "Error: Uploaded object not found in owned objects."
                     exit 1
                 fi
+
+            - name: Access object with bad auth
+              run: |
+                ID=$(echo '${{ steps.upload_object.outputs.response }}' | jq -r '.id')
+                ! curl -s -f -X GET "http://localhost:8080/objects/$ID"
+
+            - name: Log out
+              run: |
+                curl -s -f -X POST http://localhost:8080/auth/logout \
+                -H "Authorization: Bearer ${{ steps.create_account.outputs.auth_token }}"
+            
+            - name: Access file with expired token
+              run: |
+                ID=$(echo '${{ steps.upload_object.outputs.response }}' | jq -r '.id')
+                ! curl -s -f -X GET "http://localhost:8080/objects/$ID" \
+                    -H "Authorization: Bearer ${{ steps.create_account.outputs.auth_token }}"
