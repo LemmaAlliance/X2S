@@ -1,0 +1,46 @@
+name: CMake on a single platform
+
+on:
+  push:
+    branches: [ "master" ]
+  pull_request:
+    branches: [ "master" ]
+
+env:
+  BUILD_TYPE: Release
+
+jobs:
+    build:
+      runs-on: ubuntu-latest
+    
+      steps:
+      - uses: actions/checkout@v4
+        
+      - name: Install dependencies
+        run: sudo apt update && sudo apt install -y libmicrohttpd-dev
+        
+      - name: Configure CMake
+        run: cmake -B ${{github.workspace}}/build -DCMAKE_BUILD_TYPE=${{env.BUILD_TYPE}}
+        
+      - name: Build
+        run: cmake --build ${{github.workspace}}/build --config ${{env.BUILD_TYPE}}
+        
+      - name: Start Server
+        run: |
+          ${{github.workspace}}/build/x2s &
+          # Give the background server 2 seconds to boot before curl hits it
+          sleep 2 
+        
+      - name: Create Account
+        id: create_account
+        run: |
+          # Removed the broken backslash escape sequence
+          RESPONSE=$(curl -s -f -X POST http://localhost:8080/auth/register -d 'username=alice&password=foobar')
+          
+          TOKEN=$(echo "$RESPONSE" | jq -r '.token')
+          echo "auth_token=$TOKEN" >> $GITHUB_OUTPUT
+      
+      - name: Return Token
+        run: |
+          echo "The token is: ${{ steps.create_account.outputs.auth_token }}"
+        
