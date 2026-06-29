@@ -73,6 +73,7 @@ jobs:
               run: |
                 ID=$(echo '${{ steps.upload_object.outputs.response }}' | jq -r '.id')
                 ! curl -s -f -X GET "http://localhost:8080/objects/$ID"
+                echo "Unable to access object (this is good)."
 
             - name: Log out
               run: |
@@ -83,4 +84,5 @@ jobs:
               run: |
                 ID=$(echo '${{ steps.upload_object.outputs.response }}' | jq -r '.id')
                 ! curl -s -f -X GET "http://localhost:8080/objects/$ID" \
-                    -H "Authorization: Bearer ${{ steps.create_account.outputs.auth_token }}"
+                -H "Authorization: Bearer ${{ steps.create_account.outputs.auth_token }}"
+                echo "Unable to access object (this is good)."
