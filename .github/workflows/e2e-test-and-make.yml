@@ -47,8 +47,8 @@ jobs:
               run: |
                 RESPONSE=$(curl -s -f -X POST http://localhost:8080/objects \
                 -H "Authorization: Bearer ${{ steps.create_account.outputs.auth_token }}" \
-                -H 'X-Filename: hello.txt'
-                -H 'X-Category: documents'
+                -H 'X-Filename: hello.txt' \
+                -H 'X-Category: documents' \
                 -H 'X-Extension: txt' \
                 -d 'Hello, World!')
 
