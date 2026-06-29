@@ -10,11 +10,6 @@
 #include <string.h>
 #include <strings.h>
 
-/* Note: The full definition of struct ApiServer is defined in api_helpers.h,
-   but we just need to ensure your api_helpers.h definition includes:
-   const char *cors_origin;
-   If it doesn't, add "const char *cors_origin;" inside the struct in api_helpers.h! */
-
 /* -------------------------------------------------------------------------
  * CORS support
  * ---------------------------------------------------------------------- */
@@ -297,13 +292,24 @@ static enum MHD_Result handle_list_objects(struct MHD_Connection *conn, ApiServe
             json = tmp;
         }
 
-        /* Output format now tracks the extension key:
-        {"id":"...","category":"...","filename":"...","extension":"...","size":123} */
-        size_t written = snprintf(json + json_len, json_cap - json_len,
-            "%s{\"id\":\"%s\",\"category\":\"%s\",\"filename\":\"%s\",\"extension\":\"%s\",\"size\":%zu}",
-            (i > 0) ? "," : "", hex_id, obj_cat, obj_fn, obj_ext, objects[i]->size);
+        if (json_len >= json_cap) {
+          break;
+        }
+        size_t remaining = json_cap - json_len;
+
+        int res = snprintf(json + json_len, remaining, 
+                   "%s{\"id\":\"%s\",\"category\":\"%s\",\"filename\":\"%s\",\"extension\":\"%s\",\"size\":%zu}", 
+                   (i > 0) ? "," : "", hex_id, obj_cat, obj_fn, obj_ext, objects[i]->size);
         
-        json_len += written;
+        if (res > 0) {
+          break;
+        }
+
+        if ((size_t)res >= remaining) {
+          break;
+        }
+
+        json_len += (size_t)res;
     }
 
     strcat(json, "]}");
