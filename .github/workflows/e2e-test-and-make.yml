@@ -56,8 +56,8 @@ jobs:
             
             - name: List owned objects
               run: |
-                RESPONSE=$(curl -H "Authorization: Bearer ${{ steps.create_account.outputs.auth_token }}" \ 
-                "http://localhost:8080/objects")
+                RESPONSE=$(curl -H 'Authorization: Bearer ${{ steps.create_account.outputs.auth_token }}' \
+                -X GET "http://localhost:8080/objects")
 
                 echo "Owned objects: $RESPONSE"
 
