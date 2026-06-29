@@ -61,7 +61,9 @@ jobs:
 
                 echo "Owned objects: $RESPONSE"
 
-                if [[ "$RESPONSE" != ${{steps.upload_object.outputs.response}} ]]; then
+                EXPECTED_ID=$(echo '${{ steps.upload_object.outputs.response }}' | jq -r '.id')
+
+                if ! echo "$RESPONSE" | jq --arg id "$EXPECTED_ID" '.objects[] | select(.id == $id)' | grep -q "$EXPECTED_ID"; then
                     echo "Error: Uploaded object not found in owned objects."
                     exit 1
-                fi}}]]
+                fi
