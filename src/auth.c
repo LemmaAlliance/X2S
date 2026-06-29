@@ -6,7 +6,7 @@
 #include <openssl/crypto.h>
 #include "auth.h"
 
-#define PBKDF2_ITERATIONS 100000
+#define PBKDF2_ITERATIONS 400000
 #define PATH_MAX_LEN 4096
 
 void hash_password(const char *password, const unsigned char salt[SALT_SIZE],

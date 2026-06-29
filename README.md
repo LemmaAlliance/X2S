@@ -5,6 +5,9 @@ A lightweight, RESTful blob storage server written in C11. Upload and retrieve b
 ## Quick start
 
 ```bash
+# update package repos
+sudo apt update
+
 # install dependencies (Debian/Ubuntu)
 sudo apt install build-essential cmake libmicrohttpd-dev libssl-dev
 
@@ -51,7 +54,7 @@ curl -X POST http://localhost:8080/auth/logout \
 
 ```
 
-Passwords are hashed with **PBKDF2-HMAC-SHA256** (100,000 iterations, random 16-byte salt, max 1024 bytes). The server stores only the salted hash — never the plaintext password. Password hashes and session tokens are compared using **constant-time** (`CRYPTO_memcmp`) to prevent timing side-channel attacks.
+Passwords are hashed with **PBKDF2-HMAC-SHA256** (400,000 iterations, random 16-byte salt, max 1024 bytes). The server stores only the salted hash — never the plaintext password. Password hashes and session tokens are compared using **constant-time** (`CRYPTO_memcmp`) to prevent timing side-channel attacks.
 
 ### Object operations
 
