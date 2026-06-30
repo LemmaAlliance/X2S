@@ -1,6 +1,6 @@
-<mxfile host="app.diagrams.net">
+<mxfile host="Electron">
   <diagram name="Page-1" id="B9qCNvdTJSgl2WL-M3CE">
-    <mxGraphModel dx="1735" dy="2116" grid="1" gridSize="10" guides="1" tooltips="1" connect="1" arrows="1" fold="1" page="0" pageScale="1" pageWidth="827" pageHeight="1169" math="0" shadow="0">
+    <mxGraphModel dx="2030" dy="2336" grid="1" gridSize="10" guides="1" tooltips="1" connect="1" arrows="1" fold="1" page="0" pageScale="1" pageWidth="827" pageHeight="1169" math="0" shadow="0">
       <root>
         <mxCell id="0" />
         <mxCell id="1" parent="0" />
@@ -370,23 +370,19 @@
         <mxCell id="P8cqbxMwNSCLWZZRxEHg-99" parent="1" style="rhombus;whiteSpace=wrap;html=1;" value="&lt;div&gt;Is upload&amp;nbsp;&lt;/div&gt;&lt;div&gt;data size &amp;gt; 0?&lt;/div&gt;" vertex="1">
           <mxGeometry height="80" width="130" x="-265" y="-770" as="geometry" />
         </mxCell>
-        <mxCell id="P8cqbxMwNSCLWZZRxEHg-109" edge="1" parent="1" source="P8cqbxMwNSCLWZZRxEHg-105" style="edgeStyle=orthogonalEdgeStyle;rounded=0;orthogonalLoop=1;jettySize=auto;html=1;" target="P8cqbxMwNSCLWZZRxEHg-108" value="">
-          <mxGeometry relative="1" as="geometry" />
-        </mxCell>
         <mxCell id="P8cqbxMwNSCLWZZRxEHg-105" parent="1" style="whiteSpace=wrap;html=1;" value="Make a size_t for size" vertex="1">
           <mxGeometry height="60" width="120" x="-260" y="-620" as="geometry" />
         </mxCell>
-        <mxCell id="P8cqbxMwNSCLWZZRxEHg-111" edge="1" parent="1" source="P8cqbxMwNSCLWZZRxEHg-108" style="edgeStyle=orthogonalEdgeStyle;rounded=0;orthogonalLoop=1;jettySize=auto;html=1;" target="P8cqbxMwNSCLWZZRxEHg-110" value="">
-          <mxGeometry relative="1" as="geometry" />
-        </mxCell>
-        <mxCell id="P8cqbxMwNSCLWZZRxEHg-108" parent="1" style="whiteSpace=wrap;html=1;" value="Ensure incoming data is not bigger than limit." vertex="1">
-          <mxGeometry height="60" width="120" x="-260" y="-530" as="geometry" />
+        <mxCell id="P8cqbxMwNSCLWZZRxEHg-111" edge="1" parent="1" source="P8cqbxMwNSCLWZZRxEHg-105" style="edgeStyle=orthogonalEdgeStyle;rounded=0;orthogonalLoop=1;jettySize=auto;html=1;" target="P8cqbxMwNSCLWZZRxEHg-110" value="">
+          <mxGeometry relative="1" as="geometry">
+            <mxPoint x="-199.99999999999977" y="-470.0000000000002" as="sourcePoint" />
+          </mxGeometry>
         </mxCell>
         <mxCell id="P8cqbxMwNSCLWZZRxEHg-167" edge="1" parent="1" source="P8cqbxMwNSCLWZZRxEHg-110" style="edgeStyle=orthogonalEdgeStyle;rounded=0;orthogonalLoop=1;jettySize=auto;html=1;exitX=0.5;exitY=1;exitDx=0;exitDy=0;" target="P8cqbxMwNSCLWZZRxEHg-166">
           <mxGeometry relative="1" as="geometry" />
         </mxCell>
         <mxCell id="P8cqbxMwNSCLWZZRxEHg-110" parent="1" style="whiteSpace=wrap;html=1;" value="Write file to disk" vertex="1">
-          <mxGeometry height="60" width="120" x="-260" y="-450" as="geometry" />
+          <mxGeometry height="60" width="120" x="-260" y="-515" as="geometry" />
         </mxCell>
         <mxCell id="P8cqbxMwNSCLWZZRxEHg-113" parent="1" style="text;html=1;whiteSpace=wrap;strokeColor=none;fillColor=none;align=center;verticalAlign=middle;rounded=0;" value="Accumulate&amp;nbsp; body" vertex="1">
           <mxGeometry height="30" width="70" x="-295" y="-660" as="geometry" />
