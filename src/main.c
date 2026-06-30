@@ -8,6 +8,7 @@
 
 #define DEFAULT_PORT 8080
 #define DEFAULT_CORS "*"
+#define MAIN_SLEEP_MS 100000
 
 static volatile int running = 1;
 
@@ -86,7 +87,8 @@ int main(int argc, char *argv[]) {
 
   signal(SIGINT, handle_sigint);
   while (running){
-    sleep(1);
+    usleep(MAIN_SLEEP_MS);
+    // sleep(1);
     check_token_expiry(sessions);
   }
 

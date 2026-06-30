@@ -44,6 +44,7 @@ Register a user and obtain a bearer token. All authentication endpoints use `app
 # register
 curl -X POST http://localhost:8080/auth/register \
   -d 'username=alice&password=secret123'
+# → {"token":"<64-hex>","user_id":"<32-hex>"}
 
 # login
 curl -X POST http://localhost:8080/auth/login \

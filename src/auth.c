@@ -9,7 +9,7 @@
 
 #define PBKDF2_ITERATIONS 400000
 #define PATH_MAX_LEN 4096
-#define TOKEN_EXPIRY_SECONDS 20
+#define TOKEN_EXPIRY_SECONDS 1800 /* 30 min token expiry */
 
 void hash_password(const char *password, const unsigned char salt[SALT_SIZE],
                    unsigned char out[HASH_SIZE]) {

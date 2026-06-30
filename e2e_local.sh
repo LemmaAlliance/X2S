@@ -8,11 +8,9 @@ BUILD_TYPE="Release"
 WORKSPACE_DIR="$(pwd)"
 BUILD_DIR="${WORKSPACE_DIR}/build"
 
-
-echo "=== Create Account ==="
-RESPONSE=$(curl -s -f -X POST http://localhost:8080/auth/register -d 'username=alice&password=foobar')
-
 # If the user already exists this won't work
+echo "=== Create Account ==="
+RESPONSE=$(curl -s -f -X POST http://localhost:8080/auth/login -d 'username=alice&password=foobar')
 
 AUTH_TOKEN=$(echo "$RESPONSE" | jq -r '.token')
 
@@ -22,6 +20,7 @@ echo "=== Login with invalid user ==="
 ! curl -s -f -X POST http://localhost:8080/auth/login -d 'username=alice&password=bazquux'
 echo "Unable to login with bad username and password (this is good)"
 
+# This won't work if the object already exists
 echo "=== Upload object ==="
 UPLOAD_RESPONSE=$(curl -s -f -X POST http://localhost:8080/objects \
 -H "Authorization: Bearer ${AUTH_TOKEN}" \
