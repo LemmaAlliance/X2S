@@ -77,7 +77,7 @@ jobs:
 
           echo "Accessed object: $RESPONSE"
 
-          if echo "$RESPONSE" == "Hello, World!"; then
+          if "$RESPONSE" == "Hello, World!"; then
               echo "Successfully accessed the object with good auth."
           else
               echo "Error: Unable to access the object with good auth."
