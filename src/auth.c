@@ -308,17 +308,22 @@ void session_destroy(SessionStore *store, const unsigned char token[TOKEN_SIZE])
 }
 
 void check_token_expiry(SessionStore *store) {
-    if (!store) return;
+    if (!store || store->count == 0) return;
 
     time_t now = time(NULL);
-    size_t i = 0;
-    while (i < store->count) {
-        if (store->sessions[i].expiry <= now) {
-            // Use session_destroy to remove the expired session
-            session_destroy(store, store->sessions[i].token);
-            // Do not increment i, as the next session has shifted into this index
+    size_t write_index = 0;
+
+    for (size_t read_index=0; read_index < store->count; read_index++) {
+        if (store->sessions[read_index].expiry > now) {
+            if (write_index != read_index) {
+                store->sessions[write_index] = store->sessions[read_index];
+            }
+            write_index++;
         } else {
-            i++;
+            // Clear memory of expired token for saftey
+            memset(&store->sessions[read_index], 0, sizeof(Session));
         }
     }
+
+    store->count = write_index;
 }
