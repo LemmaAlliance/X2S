@@ -1,5 +1,7 @@
 #!/usr/bin/bash
 
+# For running end to end tests locally
+
 set -e
 
 echo "Starting e2e tests..."

@@ -202,7 +202,7 @@ cmake -S . -B build && cmake --build build
 * **Content-addressed & Deduplicated** — payload contents are identified via unique data hashes. Multiple metadata targets reference identical chunks on disk, achieving file deduplication across users while preserving access control sandboxing.
 * **Metadata query discovery** — indexes user spaces globally in real-time by crawling local hash-node buckets to enforce precise sandbox filtering constraints quickly.
 * **Constant-time comparisons** — password hashes and session tokens are compared with `CRYPTO_memcmp` to mitigate timing attacks.
-* **No session expiry** — bearer tokens live until server restart. Re-authentication is required after restart. (This is a future feature)
+* **Poor session expiry** — At the moment, token expiry is handled however it won't be good on large scales as it runs in about O(n) I would consider it to be secure though, but you should review yourself. Expired tokens are checked for evey 100ms with a linear search but I want to move to a linked list or something.
 * **Maximum password length** — 1024 bytes.
 * **Maximum object size** — 64 MiB (hardcoded as `MAX_UPLOAD_SIZE` in `api_server.c`).
 * **No rate limiting** — `/auth/login` accepts unlimited requests; pair with external rate limiting for brute-force protection. (This is a future feature)
