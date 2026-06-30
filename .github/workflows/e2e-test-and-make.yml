@@ -42,6 +42,11 @@ jobs:
       - name: Return Token
         run: |
           echo "The token is: ${{ steps.create_account.outputs.auth_token }}"
+      
+      - name: Login with invalid user
+        run: |
+          ! curl -s -f -X POST http://localhost:8080/auth/login -d 'username=alice&password=bazquux'
+          echo "Unable to login with bad username and password (this is good)"
 
       - name: Upload object
         id: upload_object
@@ -101,3 +106,7 @@ jobs:
           ! curl -s -f -X GET "http://localhost:8080/objects/$ID" \
           -H "Authorization: Bearer ${{ steps.create_account.outputs.auth_token }}"
           echo "Unable to access object (this is good)."
+      
+      - name: Stop Server
+        run: |
+          pkill x2s || true
