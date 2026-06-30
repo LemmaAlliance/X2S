@@ -183,7 +183,7 @@ int count_data_blob_references(ObjectStore *store, const unsigned char target_da
     return reference_count;
 }
 
-int compute_data_hash(const FILE *file, size_t size, unsigned char out[32]) {
+int compute_data_hash(const FILE *file, unsigned char out[32]) {
     if (!file) return 0;
     
     EVP_MD_CTX *ctx = EVP_MD_CTX_new();
@@ -274,7 +274,7 @@ int write_object_file(ObjectStore *store, Object *obj) {
     /*  WRITE DATA REFERENCE  */
     unsigned char data_hash[32];
     // TODO: Data hash is possibly redundant when we have more than one reference?
-    if (!compute_data_hash(obj->data, obj->size, data_hash)) { fclose(f); return 0; }
+    if (!compute_data_hash(obj->data, data_hash)) { fclose(f); return 0; }
     if (fwrite(data_hash, 1, 32, f) != 32) { fclose(f); return 0; }
 
     /*  METADATA (Strings)  */
