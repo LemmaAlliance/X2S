@@ -209,7 +209,7 @@ int count_data_blob_references(ObjectStore *store, const unsigned char target_da
     return reference_count;
 }
 
-int compute_data_hash(const FILE *file, unsigned char out[32]) {
+int compute_data_hash(FILE *file, unsigned char out[32]) {
     if (!file) return 0;
     
     EVP_MD_CTX *ctx = EVP_MD_CTX_new();
