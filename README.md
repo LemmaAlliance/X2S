@@ -20,15 +20,17 @@ cmake -S . -B build && cmake --build build
 ```
 
 ```
+Welcome to X2S — eXtremely Simple Storage
 Listening on http://0.0.0.0:8080
+Allowed CORS Origin: *
   POST  /auth/register      register a new user
   POST  /auth/login          authenticate and get a token
   POST  /auth/logout         invalidate a token
   POST  /objects             upload an object
-  GET   /objects             list accessible objects with filters
+  GET   /objects             list owned objects
   GET   /objects/<id>        retrieve an object
   DELETE /objects/<id>       remove an object
-  POST  /objects/<id>/share  grant object permissions to another user
+Press Ctrl-C to stop.
 
 ```
 
