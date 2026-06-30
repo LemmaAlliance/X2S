@@ -183,7 +183,9 @@ int count_data_blob_references(ObjectStore *store, const unsigned char target_da
     return reference_count;
 }
 
-int compute_data_hash(const void *data, size_t size, unsigned char out[32]) {
+int compute_data_hash(const FILE *file, size_t size, unsigned char out[32]) {
+    if (!file) return 0;
+    
     EVP_MD_CTX *ctx = EVP_MD_CTX_new();
     if (!ctx) return 0;
 
@@ -192,19 +194,30 @@ int compute_data_hash(const void *data, size_t size, unsigned char out[32]) {
         return 0;
     }
 
-    if (data && size > 0) {
-        if (!EVP_DigestUpdate(ctx, data, size)) {
+    unsigned char buffer[4096];
+    size_t bytes_read;
+
+    while ((bytes_read = fread(buffer, 1, sizeof(buffer), file)) > 0) {
+        if (!EVP_DigestUpdate(ctx, buffer, bytes_read)) {
             EVP_MD_CTX_free(ctx);
             return 0;
         }
     }
 
-    unsigned int len = 32;
+    /* Check if we had a file error */
+    if (ferror((FILE *)file)) {
+        EVP_MD_CTX_free(ctx);
+        return 0;
+    }
+
+    /* Hash final part */
+    unsigned int len = 0;
     if (!EVP_DigestFinal_ex(ctx, out, &len)) {
         EVP_MD_CTX_free(ctx);
         return 0;
     }
 
+    /* Clean up mem */
     EVP_MD_CTX_free(ctx);
     return 1;
 }
@@ -284,7 +297,20 @@ int write_object_file(ObjectStore *store, Object *obj) {
         df = fopen(data_path, "wb");
         if (df) {
             if (obj->size > 0 && obj->data) {
-                fwrite(obj->data, 1, obj->size, df);
+                fseek(obj->data, 0, SEEK_SET);
+
+                char buffer[4096];
+                size_t bytes_to_read = obj->size;
+                size_t bytes_read;
+
+                /* Basically we iterate in chunks of 4096 over file */
+                while (bytes_to_read > 0 &&
+                        (bytes_read = fread(buffer, 1, 
+                        (bytes_to_read < sizeof(buffer)) ? 
+                        bytes_to_read : sizeof(buffer), obj->data)) > 0) {
+                    fwrite(buffer, 1, bytes_read, df);
+                    bytes_to_read -= bytes_read;
+                }
             }
             fclose(df);
         }
