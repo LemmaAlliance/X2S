@@ -3,6 +3,7 @@
 
 #include <stdlib.h>
 #include <stdint.h>
+#include <time.h>
 
 #define SALT_SIZE 16
 #define HASH_SIZE 32
@@ -26,6 +27,7 @@ typedef struct {
 typedef struct {
     unsigned char token[TOKEN_SIZE];
     unsigned char user_id[16];
+    time_t expiry;
 } Session;
 
 typedef struct {
@@ -62,5 +64,7 @@ void hash_password(const char *password, const unsigned char salt[SALT_SIZE],
 
 int hex_to_bytes(const char *hex, unsigned char *out, size_t out_len);
 void bytes_to_hex(const unsigned char *bytes, size_t len, char *out);
+
+void check_token_expiry(SessionStore *store);
 
 #endif

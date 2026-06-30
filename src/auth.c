@@ -4,10 +4,12 @@
 #include <openssl/evp.h>
 #include <openssl/rand.h>
 #include <openssl/crypto.h>
+#include <time.h>
 #include "auth.h"
 
 #define PBKDF2_ITERATIONS 400000
 #define PATH_MAX_LEN 4096
+#define TOKEN_EXPIRY_SECONDS 20
 
 void hash_password(const char *password, const unsigned char salt[SALT_SIZE],
                    unsigned char out[HASH_SIZE]) {
@@ -269,6 +271,9 @@ char *session_create(SessionStore *store, const unsigned char user_id[16]) {
     if (!hex) return NULL;
     bytes_to_hex(s->token, TOKEN_SIZE, hex);
 
+    time_t now = time(NULL);
+    s->expiry = now;
+    s->expiry = now + TOKEN_EXPIRY_SECONDS;
     store->count++;
     return hex;
 }
@@ -298,6 +303,22 @@ void session_destroy(SessionStore *store, const unsigned char token[TOKEN_SIZE])
             }
             store->count--;
             return;
+        }
+    }
+}
+
+void check_token_expiry(SessionStore *store) {
+    if (!store) return;
+
+    time_t now = time(NULL);
+    size_t i = 0;
+    while (i < store->count) {
+        if (store->sessions[i].expiry <= now) {
+            // Use session_destroy to remove the expired session
+            session_destroy(store, store->sessions[i].token);
+            // Do not increment i, as the next session has shifted into this index
+        } else {
+            i++;
         }
     }
 }

@@ -85,8 +85,10 @@ int main(int argc, char *argv[]) {
   printf("Press Ctrl-C to stop.\n\n");
 
   signal(SIGINT, handle_sigint);
-  while (running)
+  while (running){
     sleep(1);
+    check_token_expiry(sessions);
+  }
 
   printf("\nShutting down...\n");
   api_server_stop(api);
