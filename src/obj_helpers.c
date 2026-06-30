@@ -52,7 +52,33 @@ int compute_object_id(User *user, Object *obj, unsigned char out[32]) {
     }
 
     if (obj->data && obj->size > 0) {
-        if (!EVP_DigestUpdate(ctx, obj->data, obj->size)) {
+        /* obj->data is a FILE* stream (data is now streamed to/from disk),
+         * not an in-memory buffer, so it must be hashed in chunks like
+         * compute_data_hash() does below -- not passed directly to
+         * EVP_DigestUpdate, which would hash the bytes at the FILE*
+         * pointer's address instead of the file's contents. */
+        if (fseek(obj->data, 0, SEEK_SET) != 0) {
+            EVP_MD_CTX_free(ctx);
+            return 0;
+        }
+
+        unsigned char buffer[4096];
+        size_t bytes_read;
+        while ((bytes_read = fread(buffer, 1, sizeof(buffer), obj->data)) > 0) {
+            if (!EVP_DigestUpdate(ctx, buffer, bytes_read)) {
+                EVP_MD_CTX_free(ctx);
+                return 0;
+            }
+        }
+
+        if (ferror(obj->data)) {
+            EVP_MD_CTX_free(ctx);
+            return 0;
+        }
+
+        /* Rewind so downstream code (e.g. write_object_file's call to
+         * compute_data_hash) reads the stream from the start too. */
+        if (fseek(obj->data, 0, SEEK_SET) != 0) {
             EVP_MD_CTX_free(ctx);
             return 0;
         }
