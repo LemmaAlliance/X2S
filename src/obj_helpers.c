@@ -258,8 +258,9 @@ int write_object_file(ObjectStore *store, Object *obj) {
         }
     }
 
-    /*  WRITE DATA REFERENCE INSTEAD OF RAW DATA  */
+    /*  WRITE DATA REFERENCE  */
     unsigned char data_hash[32];
+    // TODO: Data hash is possibly redundant when we have more than one reference?
     if (!compute_data_hash(obj->data, obj->size, data_hash)) { fclose(f); return 0; }
     if (fwrite(data_hash, 1, 32, f) != 32) { fclose(f); return 0; }
 

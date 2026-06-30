@@ -229,7 +229,7 @@ int put_object(ObjectStore *store, User *user, Object *obj) {
         index_obj->metadata = NULL;
     }
 
-    /* IMPORTANT: carry security metadata in memory index too */
+    /* Carry security metadata in memory index too */
     memcpy(index_obj->owner, obj->owner, 16);
     index_obj->acl = obj->acl;
 

@@ -106,7 +106,7 @@ static enum MHD_Result handle_put(struct MHD_Connection *conn,
   if (ub->len == 0)
     return send_error_cors(conn, server->cors_origin, MHD_HTTP_BAD_REQUEST, "empty body");
 
-    /* Read optional metadata headers */
+  /* Read optional metadata headers */
   const char *category = MHD_lookup_connection_value(conn, MHD_HEADER_KIND, "X-Category");
   const char *extension = MHD_lookup_connection_value(conn, MHD_HEADER_KIND, "X-Extension");
   const char *filename = MHD_lookup_connection_value(conn, MHD_HEADER_KIND, "X-Filename");

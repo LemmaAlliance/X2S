@@ -154,6 +154,7 @@ void get_user_from_request(struct MHD_Connection *conn, User *user,
                            TokenStore *tokens) {
   // 1. Initialize to a safe baseline default (Anonymous)
   memset(user, 0, sizeof(User));
+  // TODO: What if a user is actually called anonymous??
   snprintf(user->username, sizeof(user->username), "anonymous");
 
   const char *auth =
