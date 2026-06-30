@@ -3,6 +3,7 @@
 
 #include <stdlib.h>
 #include <stdint.h>
+#include <stdio.h>
 
 #define PERM_READ  1
 #define PERM_WRITE 2
@@ -33,7 +34,7 @@ typedef struct {
     unsigned char id[32]; // SHA-256
     size_t size; // byte length of data
     Metadata *metadata; // populated on get_object, NULL otherwise
-    void *data; // populated on get_object, NULL otherwise
+    FILE *data; // populated on get_object, NULL otherwise
     ACL *acl;
     unsigned char owner[16];
 } Object;

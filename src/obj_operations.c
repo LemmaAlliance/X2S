@@ -517,7 +517,7 @@ int list_user_objects(ObjectStore *store, User *user,
                             }
                         }
 
-                        // NEW: Apply optional extension filter
+                        // Apply optional extension filter
                         if (filter_extension && strlen(filter_extension) > 0) {
                             if (!full_obj->metadata || !full_obj->metadata->extension ||
                                 strcmp(full_obj->metadata->extension, filter_extension) != 0) {

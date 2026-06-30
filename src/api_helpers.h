@@ -28,6 +28,11 @@ typedef struct {
   size_t cap;
 } UploadBuffer;
 
+typedef struct {
+  FILE *fp;
+  size_t len;
+} FileUploadBuffer;
+
 const char *mime_for_extension(const char *ext);
 enum MHD_Result send_error(struct MHD_Connection *conn,
                                   unsigned int status, const char *msg);
