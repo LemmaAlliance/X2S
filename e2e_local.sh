@@ -31,6 +31,8 @@ UPLOAD_RESPONSE=$(curl -s -f -X POST http://localhost:8080/objects \
 -H 'X-Extension: txt' \
 -d 'Hello, World!')
 
+echo "Uploaded object: $UPLOAD_RESPONSE"
+
 echo "=== List owned objects ==="
 LIST_RESPONSE=$(curl -H "Authorization: Bearer ${AUTH_TOKEN}" \
 -X GET "http://localhost:8080/objects")
