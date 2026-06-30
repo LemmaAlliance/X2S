@@ -68,38 +68,52 @@ static enum MHD_Result handle_put(struct MHD_Connection *conn,
                                   size_t *upload_data_size, void **con_cls) {
   /* First call — initialise the accumulation buffer */
   if (!*con_cls) {
-    UploadBuffer *ub = calloc(1, sizeof(UploadBuffer));
+    FileUploadBuffer *ub = calloc(1, sizeof(FileUploadBuffer));
     if (!ub)
       return MHD_NO;
     *con_cls = ub;
     return MHD_YES;
   }
 
-  UploadBuffer *ub = *con_cls;
+  FileUploadBuffer *ub = *con_cls;
 
   /* Accumulate body chunks */
   if (*upload_data_size > 0) {
     size_t incoming = *upload_data_size;
 
-    if (ub->len + incoming > MAX_UPLOAD_SIZE)
-      return send_error_cors(conn, server->cors_origin, MHD_HTTP_CONTENT_TOO_LARGE,
-                        "body exceeds 64 MiB limit");
+    /* Initialize temporary file */
+    if (ub->fp == NULL) {
+      char template[] = "/tmp/upload_XXXXXX";
+      int fd = mkstemp(template);
+      if (fd == -1) {
+        return send_error_cors(
+          conn, server->cors_origin, MHD_HTTP_INTERNAL_SERVER_ERROR, "Failed to create temporary file"
+        );
+      }
 
-    /* Grow buffer if needed */
-    if (ub->len + incoming > ub->cap) {
-      size_t new_cap = (ub->cap == 0) ? incoming : ub->cap;
-      while (new_cap < ub->len + incoming)
-        new_cap *= 2;
-      char *tmp = realloc(ub->buf, new_cap);
-      if (!tmp)
+      unlink(template);
+
+      ub->fp = fdopen(fd, "wb+");
+      if (!ub->fp) {
+        close(fd);
         return MHD_NO;
-      ub->buf = tmp;
-      ub->cap = new_cap;
+      }
+
+      ub->len = 0;
     }
 
-    memcpy(ub->buf + ub->len, upload_data, incoming);
-    ub->len += incoming;
+    /* Write incoming chunk */
+    size_t written = fwrite(upload_data, 1, incoming, ub->fp);
+    if (written < incoming) {
+      /* Handle disk full/write error */
+      return send_error_cors(
+        conn, server->cors_origin, MHD_HTTP_INTERNAL_SERVER_ERROR, "Disk write failure"
+      );
+    }
+
+    ub->len += written;
     *upload_data_size = 0;
+
     return MHD_YES;
   }
 
@@ -118,7 +132,7 @@ static enum MHD_Result handle_put(struct MHD_Connection *conn,
   };
 
   Object obj = {0};
-  obj.data = ub->buf;
+  obj.data = ub->fp;
   obj.size = ub->len;
   obj.metadata = (category || extension || filename) ? &meta : NULL;
 
