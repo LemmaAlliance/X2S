@@ -35,6 +35,15 @@ void free_metadata(Metadata *metadata) {
 
 /* SHA-256 object hashing */
 
+static int hash_file_stream(EVP_MD_CTX *ctx, FILE *file) {
+    unsigned char buffer[4096];
+    size_t bytes_read;
+    while ((bytes_read = fread(buffer, 1, sizeof(buffer), file)) > 0) {
+        if (!EVP_DigestUpdate(ctx, buffer, bytes_read)) return 0;
+    }
+    return !ferror(file);
+}
+
 int compute_object_id(User *user, Object *obj, unsigned char out[32]) {
     EVP_MD_CTX *ctx = EVP_MD_CTX_new();
     if (!ctx) return 0;
@@ -62,13 +71,9 @@ int compute_object_id(User *user, Object *obj, unsigned char out[32]) {
             return 0;
         }
 
-        unsigned char buffer[4096];
-        size_t bytes_read;
-        while ((bytes_read = fread(buffer, 1, sizeof(buffer), obj->data)) > 0) {
-            if (!EVP_DigestUpdate(ctx, buffer, bytes_read)) {
-                EVP_MD_CTX_free(ctx);
-                return 0;
-            }
+        if (!hash_file_stream(ctx, obj->data)) {
+            EVP_MD_CTX_free(ctx);
+            return 0;
         }
 
         if (ferror(obj->data)) {
@@ -176,7 +181,7 @@ int count_data_blob_references(ObjectStore *store, const unsigned char target_da
             if (memcmp(node->obj->id, current_meta_id, 32) != 0) {
                 
                 /* Open the metadata file to read its embedded data reference hash */
-                char path[4096 + 128];
+                char path[PATH_MAX_LEN + 128];
                 object_path(store, node->obj->id, path, sizeof(path));
                 FILE *f = fopen(path, "rb");
                 if (f) {
@@ -220,14 +225,9 @@ int compute_data_hash(FILE *file, unsigned char out[32]) {
         return 0;
     }
 
-    unsigned char buffer[4096];
-    size_t bytes_read;
-
-    while ((bytes_read = fread(buffer, 1, sizeof(buffer), file)) > 0) {
-        if (!EVP_DigestUpdate(ctx, buffer, bytes_read)) {
-            EVP_MD_CTX_free(ctx);
-            return 0;
-        }
+    if (!hash_file_stream(ctx, file)) {
+        EVP_MD_free(ctx);
+        return 0;
     }
 
     /* Check if we had a file error */
@@ -263,7 +263,7 @@ int compute_data_hash(FILE *file, unsigned char out[32]) {
  */
 
 int write_object_file(ObjectStore *store, Object *obj) {
-    char path[4096 + 128];
+    char path[PATH_MAX_LEN + 128];
     object_path(store, obj->id, path, sizeof(path));
 
     FILE *f = fopen(path, "wb");
@@ -311,7 +311,7 @@ int write_object_file(ObjectStore *store, Object *obj) {
     fclose(f);
 
     /*  WRITE SHARED DATA BLOB ONLY IF IT DOES NOT EXIST  */
-    char data_path[4096 + 128];
+    char data_path[PATH_MAX_LEN + 128];
     char data_hex[65];
     id_to_hex(data_hash, data_hex);
     snprintf(data_path, sizeof(data_path), "%s/data_%s", store->store_path, data_hex);
@@ -363,7 +363,7 @@ char *read_string_field(FILE *f, size_t len) {
 }
 
 int read_object_file(ObjectStore *store, const unsigned char id[32], Object *out) {
-    char path[512];
+    char path[PATH_MAX_LEN + 128];
     object_path(store, id, path, sizeof(path));
 
     FILE *f = fopen(path, "rb");
@@ -416,7 +416,7 @@ int read_object_file(ObjectStore *store, const unsigned char id[32], Object *out
     /*  READ THE ACTUAL BLOB FROM DEDUPLICATED STORAGE  */
     void *data = NULL;
     if (data_len > 0) {
-        char data_path[4096 + 128];
+        char data_path[PATH_MAX_LEN + 128];
         char data_hex[65];
         id_to_hex(data_hash, data_hex);
         snprintf(data_path, sizeof(data_path), "%s/data_%s", store->store_path, data_hex);
@@ -454,13 +454,13 @@ int read_object_file(ObjectStore *store, const unsigned char id[32], Object *out
 }
 
 void delete_metadata_file(ObjectStore *store, const unsigned char id[32]) {
-    char path[4096 + 128];
+    char path[PATH_MAX_LEN + 128];
     object_path(store, id, path, sizeof(path));
     remove(path);
 }
 
 void delete_data_blob_file(ObjectStore *store, const unsigned char data_hash[32]) {
-    char data_path[4096 + 128];
+    char data_path[PATH_MAX_LEN + 128];
     char data_hex[65];
     id_to_hex(data_hash, data_hex);
     snprintf(data_path, sizeof(data_path), "%s/data_%s", store->store_path, data_hex);
@@ -529,8 +529,6 @@ int load_index(ObjectStore *store) {
             // Fallback if file is corrupted/missing
             memcpy(index_obj->id, id, 32);
         }
-
-        memcpy(index_obj->id, id, 32);
 
         ObjectNode *node = malloc(sizeof(ObjectNode));
         if (!node) {
