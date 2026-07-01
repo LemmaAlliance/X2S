@@ -226,7 +226,7 @@ int compute_data_hash(FILE *file, unsigned char out[32]) {
     }
 
     if (!hash_file_stream(ctx, file)) {
-        EVP_MD_free(ctx);
+        EVP_MD_CTX_free(ctx);
         return 0;
     }
 
