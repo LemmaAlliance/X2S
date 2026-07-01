@@ -34,7 +34,7 @@ jobs:
 
       - name: Start Server
         run: |
-          ${{github.workspace}}/build/x2s &
+          ${{github.workspace}}/build/x2s --config config.json &
           # Give the background server 2 seconds to boot before curl hits it
           sleep 2 
 
