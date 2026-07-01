@@ -28,6 +28,10 @@ jobs:
       - name: Build
         run: cmake --build ${{github.workspace}}/build --config ${{env.BUILD_TYPE}}
 
+      - name: Move example config
+        run: |
+          mv config.example.json config.json
+
       - name: Start Server
         run: |
           ${{github.workspace}}/build/x2s &

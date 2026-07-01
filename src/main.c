@@ -28,7 +28,7 @@ int main(int argc, char *argv[]) {
 
   printf("Welcome to X2S — eXtremely Simple Storage\n");
 
-  ObjectStore *store = create_store(16, "./x2s_data");
+  ObjectStore *store = create_store(16, config.data_directory);
   if (!store) {
     fprintf(stderr, "Failed to create object store\n");
     return 1;
@@ -65,6 +65,8 @@ int main(int argc, char *argv[]) {
 
   printf("Listening on http://0.0.0.0:%u\n", port);
   printf("Allowed CORS Origin: %s\n", cors_origin);
+  printf("Data directory: %s\n", config.data_directory);
+  printf("Temporary directory: %s\n", config.temporary_directory);
   printf("  POST  /auth/register      register a new user\n");
   printf("  POST  /auth/login          authenticate and get a token\n");
   printf("  POST  /auth/logout         invalidate a token\n");
