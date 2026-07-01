@@ -1,13 +1,12 @@
 #include "api_server.h"
 #include "auth.h"
+#include "cli_setup.h"
 #include "obj_operations.h"
 #include <signal.h>
 #include <stdio.h>
 #include <stdlib.h>
 #include <unistd.h>
 
-#define DEFAULT_PORT 8080
-#define DEFAULT_CORS "*"
 #define MAIN_SLEEP_MS 100000
 
 static volatile int running = 1;
@@ -18,24 +17,14 @@ static void handle_sigint(int sig) {
 }
 
 int main(int argc, char *argv[]) {
-  unsigned int port = DEFAULT_PORT;
-  char *cors_origin = DEFAULT_CORS;
-  int opt;
+  CliConfig config;
 
-  // Process standard switch options cleanly
-  while ((opt = getopt(argc, argv, "p:c:")) != -1) {
-    switch (opt) {
-      case 'p':
-        port = (unsigned int)atoi(optarg);
-        break;
-      case 'c':
-        cors_origin = optarg;
-        break;
-      default:
-        fprintf(stderr, "Usage: %s [-p port] [-c cors_origin]\n", argv[0]);
-        return 1;
-    }
+  if (cli_setup_parse(argc, argv, &config) != 0) {
+    return 1;
   }
+
+  unsigned int port = config.port;
+  const char *cors_origin = config.cors_origin;
 
   printf("Welcome to X2S — eXtremely Simple Storage\n");
 
