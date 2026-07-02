@@ -1,5 +1,6 @@
 .vscode/
 build/
 x2s_data/
+external/
 
 config.json
