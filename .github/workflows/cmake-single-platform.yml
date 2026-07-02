@@ -4,7 +4,7 @@ name: CMake on a single platform
 
 on:
   push:
-    branches: [ "master", "Bigger-Uploads" ]
+    branches: [ "master", "Bigger-Uploads", "4-more-options-from-cli" ]
   pull_request:
     branches: [ "master" ]
 

@@ -2,7 +2,7 @@ name: Run end to end tests
 
 on:
   push:
-    branches: [ "master", "Bigger-Uploads" ]
+    branches: [ "master", "Bigger-Uploads", "4-more-options-from-cli" ]
   pull_request:
     branches: [ "master" ]
 
