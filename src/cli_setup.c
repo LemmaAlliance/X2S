@@ -7,92 +7,14 @@
 #include <string.h>
 #include <unistd.h>
 
+#include "cJSON.h"
+
 #define DEFAULT_PORT 8080
 #define DEFAULT_CORS "*"
 #define DEFAULT_DATA_DIRECTORY "./x2s_data"
 #define DEFAULT_TEMP_DIRECTORY "/tmp/x2s"
 
-static int extract_string_value_for_key(const char *json, const char *key,
-                                        char *value, size_t value_capacity) {
-  const char *match;
-  const char *cursor;
-  const char *start;
-  const char *end;
-  size_t len;
-
-  if (!json || !key || !value || value_capacity == 0) {
-    return 1;
-  }
-
-  match = strstr(json, key);
-  while (match) {
-    cursor = strchr(match + strlen(key), ':');
-    if (cursor) {
-      cursor++;
-      while (*cursor != '\0' && isspace((unsigned char)*cursor)) {
-        cursor++;
-      }
-
-      if (*cursor == '"') {
-        start = cursor + 1;
-        end = start;
-        while (*end != '\0' && (*end != '"' || (end > start && end[-1] == '\\'))) {
-          end++;
-        }
-
-        if (*end == '"') {
-          len = (size_t)(end - start);
-          if (len + 1 > value_capacity) {
-            return 1;
-          }
-
-          memcpy(value, start, len);
-          value[len] = '\0';
-          return 0;
-        }
-      }
-    }
-
-    match = strstr(match + strlen(key), key);
-  }
-
-  return 1;
-}
-
-static int extract_int_value_for_key(const char *json, const char *key, int *value_out) {
-  const char *match;
-  const char *cursor;
-  char *endptr;
-  long value;
-
-  if (!json || !key || !value_out) {
-    return 1;
-  }
-
-  match = strstr(json, key);
-  while (match) {
-    cursor = strchr(match + strlen(key), ':');
-    if (cursor) {
-      cursor++;
-      while (*cursor != '\0' && isspace((unsigned char)*cursor)) {
-        cursor++;
-      }
-
-      if (*cursor != '\0' && *cursor != '"') {
-        errno = 0;
-        value = strtol(cursor, &endptr, 10);
-        if (errno == 0 && endptr != cursor) {
-          *value_out = (int)value;
-          return 0;
-        }
-      }
-    }
-
-    match = strstr(match + strlen(key), key);
-  }
-
-  return 1;
-}
+/* Use cJSON for parsing instead of manual string extraction. */
 
 static int read_json_stream(FILE *input, char **buffer_out) {
   char chunk[256];
@@ -150,8 +72,6 @@ int cli_setup_read_config(FILE *input, CliConfig *config) {
                               "temporaryDirectory", "tempDirectory"};
   const char *cors_keys[] = {"cors_origin", "corsOrigin"};
   char *json = NULL;
-  char value[4096];
-  int parsed_port = 0;
   size_t i;
 
   if (!input || !config) {
@@ -162,31 +82,55 @@ int cli_setup_read_config(FILE *input, CliConfig *config) {
     return 1;
   }
 
-  if (extract_int_value_for_key(json, "port", &parsed_port) == 0) {
-    config->port = (unsigned int)parsed_port;
+  /* Parse JSON with cJSON */
+  cJSON *root = cJSON_Parse(json);
+  if (!root) {
+    free(json);
+    return 1;
   }
 
+  /* port */
+  {
+    cJSON *port_item = cJSON_GetObjectItemCaseSensitive(root, "port");
+    if (cJSON_IsNumber(port_item)) {
+      config->port = (unsigned int)port_item->valueint;
+    } else if (cJSON_IsString(port_item) && port_item->valuestring) {
+      char *endptr = NULL;
+      long v = strtol(port_item->valuestring, &endptr, 10);
+      if (endptr != port_item->valuestring) {
+        config->port = (unsigned int)v;
+      }
+    }
+  }
+
+  /* cors origin */
   for (i = 0; i < sizeof(cors_keys) / sizeof(cors_keys[0]); i++) {
-    if (extract_string_value_for_key(json, cors_keys[i], value, sizeof(value)) == 0) {
-      snprintf(config->cors_origin, sizeof(config->cors_origin), "%s", value);
+    cJSON *item = cJSON_GetObjectItemCaseSensitive(root, cors_keys[i]);
+    if (cJSON_IsString(item) && item->valuestring) {
+      snprintf(config->cors_origin, sizeof(config->cors_origin), "%s", item->valuestring);
       break;
     }
   }
 
+  /* data directory */
   for (i = 0; i < sizeof(data_keys) / sizeof(data_keys[0]); i++) {
-    if (extract_string_value_for_key(json, data_keys[i], value, sizeof(value)) == 0) {
-      snprintf(config->data_directory, sizeof(config->data_directory), "%s", value);
+    cJSON *item = cJSON_GetObjectItemCaseSensitive(root, data_keys[i]);
+    if (cJSON_IsString(item) && item->valuestring) {
+      snprintf(config->data_directory, sizeof(config->data_directory), "%s", item->valuestring);
       break;
     }
   }
 
+  /* temporary directory */
   for (i = 0; i < sizeof(temp_keys) / sizeof(temp_keys[0]); i++) {
-    if (extract_string_value_for_key(json, temp_keys[i], value, sizeof(value)) == 0) {
-      snprintf(config->temporary_directory, sizeof(config->temporary_directory), "%s", value);
+    cJSON *item = cJSON_GetObjectItemCaseSensitive(root, temp_keys[i]);
+    if (cJSON_IsString(item) && item->valuestring) {
+      snprintf(config->temporary_directory, sizeof(config->temporary_directory), "%s", item->valuestring);
       break;
     }
   }
 
+  cJSON_Delete(root);
   free(json);
   return 0;
 }
