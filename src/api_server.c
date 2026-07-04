@@ -71,6 +71,7 @@ static enum MHD_Result handle_put(struct MHD_Connection *conn,
     FileUploadBuffer *ub = calloc(1, sizeof(FileUploadBuffer));
     if (!ub)
       return MHD_NO;
+    ub->type = BUFFER_TYPE_FILE_UPLOAD;
     *con_cls = ub;
     return MHD_YES;
   }
@@ -374,6 +375,7 @@ static enum MHD_Result handle_auth_register(struct MHD_Connection *conn,
     UploadBuffer *ub = calloc(1, sizeof(UploadBuffer));
     if (!ub)
       return MHD_NO;
+    ub->type = BUFFER_TYPE_UPLOAD;
     *con_cls = ub;
     return MHD_YES;
   }
@@ -470,6 +472,7 @@ static enum MHD_Result handle_auth_login(struct MHD_Connection *conn,
     UploadBuffer *ub = calloc(1, sizeof(UploadBuffer));
     if (!ub)
       return MHD_NO;
+    ub->type = BUFFER_TYPE_UPLOAD;
     *con_cls = ub;
     return MHD_YES;
   }
@@ -580,6 +583,7 @@ static enum MHD_Result handle_share(struct MHD_Connection *conn,
   if (!*con_cls) {
     UploadBuffer *ub = calloc(1, sizeof(UploadBuffer));
     if (!ub) return MHD_NO;
+    ub->type = BUFFER_TYPE_UPLOAD;
     *con_cls = ub;
     return MHD_YES;
   }
@@ -766,7 +770,6 @@ static void request_completed(void *cls, struct MHD_Connection *conn,
     return;
 
   /*
-   * Only PUT and POST auth requests allocate a real UploadBuffer.
    * GET/DELETE/logout use the sentinel value 1.
    */
   if (*con_cls == (void *)1) {
@@ -775,15 +778,17 @@ static void request_completed(void *cls, struct MHD_Connection *conn,
   }
 
   /*
-   * Distinguish between UploadBuffer (auth handlers) and FileUploadBuffer (file uploads).
-   * FileUploadBuffer has a FILE* pointer that needs to be closed.
+   * Safely distinguish between UploadBuffer and FileUploadBuffer using type tag.
+   * Both structures have BufferType as their first field.
    */
-  UploadBuffer *ub = *con_cls;
-  if (ub->buf != NULL) {
+  BufferType *type_ptr = (BufferType *)*con_cls;
+  
+  if (*type_ptr == BUFFER_TYPE_UPLOAD) {
     /* This is an UploadBuffer (auth handlers) */
+    UploadBuffer *ub = (UploadBuffer *)*con_cls;
     free(ub->buf);
     free(ub);
-  } else {
+  } else if (*type_ptr == BUFFER_TYPE_FILE_UPLOAD) {
     /* This is a FileUploadBuffer (file uploads) */
     FileUploadBuffer *fub = (FileUploadBuffer *)*con_cls;
     if (fub->fp != NULL) {
@@ -791,6 +796,7 @@ static void request_completed(void *cls, struct MHD_Connection *conn,
     }
     free(fub);
   }
+  
   *con_cls = NULL;
 }
 
