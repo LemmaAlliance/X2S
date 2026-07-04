@@ -85,7 +85,11 @@ static enum MHD_Result handle_put(struct MHD_Connection *conn,
     /* Initialize temporary file */
     if (ub->fp == NULL) {
       char template[4096];
-      snprintf(template, sizeof(template), "%s/upload_XXXXXX", server->temporary_directory);
+      int n = snprintf(template, sizeof(template), "%s/upload_XXXXXX", server->temporary_directory);
+      if (n < 0 || (size_t)n >= sizeof(template)) {
+        return send_error_cors(conn, server->cors_origin, MHD_HTTP_INTERNAL_SERVER_ERROR,
+                               "Temporary directory path too long");
+      }
       int fd = mkstemp(template);
       if (fd == -1) {
         return send_error_cors(
