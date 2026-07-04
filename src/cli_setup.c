@@ -181,6 +181,12 @@ int cli_setup_parse(int argc, char *const argv[], CliConfig *config) {
       return 1;
     }
 
+    if (config->port == 0 || config->port > 65535) {
+      fprintf(stderr, "Invalid port in config (must be 1-65535): %u\n", config->port);
+      fclose(config_file);
+      return 1;
+    }
+
     fclose(config_file);
   }
 
