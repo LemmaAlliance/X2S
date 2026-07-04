@@ -2,7 +2,7 @@ name: Performance Benchmarks
 
 on:
   push:
-    branches: [ "master" ]
+    branches: [ "master", "better-cicd" ]
   pull_request:
     branches: [ "master" ]
   workflow_dispatch:

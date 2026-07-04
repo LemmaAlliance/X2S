@@ -2,7 +2,7 @@ name: Code Coverage
 
 on:
   push:
-    branches: [ "master" ]
+    branches: [ "master", "better-cicd" ]
   pull_request:
     branches: [ "master" ]
 

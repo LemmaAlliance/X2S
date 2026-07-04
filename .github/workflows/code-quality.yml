@@ -2,7 +2,7 @@ name: Code Quality
 
 on:
   push:
-    branches: [ "master", "develop" ]
+    branches: [ "master", "develop", "better-cicd" ]
   pull_request:
     branches: [ "master" ]
 
