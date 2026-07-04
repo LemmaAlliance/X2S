@@ -6,7 +6,6 @@
 typedef struct {
   unsigned int port;
   char cors_origin[4096];
-  FILE *config_file;
   char data_directory[4096];
   char temporary_directory[4096];
 } CliConfig;
