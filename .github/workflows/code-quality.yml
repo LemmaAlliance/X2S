@@ -1,0 +1,105 @@
+name: Code Quality
+
+on:
+  push:
+    branches: [ "master", "develop" ]
+  pull_request:
+    branches: [ "master" ]
+
+permissions:
+  contents: read
+  security-events: write
+
+jobs:
+  clang-format:
+    name: Code Formatting Check
+    runs-on: ubuntu-latest
+
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v4
+
+      - name: Install clang-format
+        run: sudo apt-get update && sudo apt-get install -y clang-format
+
+      - name: Check code formatting
+        run: |
+          find src external -name '*.c' -o -name '*.h' | while read file; do
+            clang-format --dry-run --Werror "$file"
+          done
+
+      - name: Show formatting diff (if failed)
+        if: failure()
+        run: |
+          echo "Formatting issues found. Run this command locally to fix:"
+          echo "  find src external -name '*.c' -o -name '*.h' | xargs clang-format -i"
+          echo ""
+          find src external -name '*.c' -o -name '*.h' | while read file; do
+            echo "=== $file ==="
+            clang-format --output-replacements-xml "$file" | grep -c "</replacement>" || true
+          done
+
+  clang-tidy:
+    name: Static Analysis
+    runs-on: ubuntu-latest
+
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v4
+
+      - name: Install dependencies
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y clang-tidy libmicrohttpd-dev libssl-dev cmake
+
+      - name: Generate compile_commands.json
+        run: cmake -B build -DCMAKE_EXPORT_COMPILE_COMMANDS=ON
+
+      - name: Run clang-tidy
+        run: |
+          find src -name '*.c' | while read file; do
+            echo "Analyzing $file..."
+            clang-tidy "$file" -p build -- || true
+          done
+
+  codeql:
+    name: CodeQL Security Scan
+    runs-on: ubuntu-latest
+
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v4
+
+      - name: Initialize CodeQL
+        uses: github/codeql-action/init@v3
+        with:
+          languages: c-cpp
+          queries: security-and-quality
+
+      - name: Install dependencies
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y libmicrohttpd-dev libssl-dev cmake
+
+      - name: Build for CodeQL
+        run: |
+          cmake -B build -DCMAKE_BUILD_TYPE=Release
+          cmake --build build
+
+      - name: Perform CodeQL Analysis
+        uses: github/codeql-action/analyze@v3
+        with:
+          category: "/language:c-cpp"
+
+  shellcheck:
+    name: Shell Script Linting
+    runs-on: ubuntu-latest
+
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v4
+
+      - name: Run shellcheck
+        run: |
+          sudo apt-get update && sudo apt-get install -y shellcheck
+          find . -name '*.sh' -type f -exec shellcheck {} +
