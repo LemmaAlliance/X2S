@@ -1,0 +1,121 @@
+name: Performance Benchmarks
+
+on:
+  push:
+    branches: [ "master" ]
+  pull_request:
+    branches: [ "master" ]
+  workflow_dispatch:
+
+permissions:
+  contents: write
+  pull-requests: write
+
+jobs:
+  benchmark:
+    name: Performance Benchmarks
+    runs-on: ubuntu-latest
+
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+
+      - name: Install dependencies
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y libmicrohttpd-dev libssl-dev cmake curl jq time bc
+
+      - name: Build optimized binary
+        run: |
+          cmake -B build -DCMAKE_BUILD_TYPE=Release
+          cmake --build build
+
+      - name: Prepare config
+        run: cp config.example.json config.json
+
+      - name: Start server
+        run: |
+          ./build/x2s --config config.json &
+          sleep 2
+
+      - name: Create test account
+        run: |
+          RESPONSE=$(curl -s -f -X POST http://localhost:8080/auth/register -d 'username=bench_user&password=benchpass123')
+          TOKEN=$(echo "$RESPONSE" | jq -r '.token')
+          echo "AUTH_TOKEN=$TOKEN" >> $GITHUB_ENV
+
+      - name: Run benchmarks
+        run: bash tests/benchmark.sh "${{ env.AUTH_TOKEN }}"
+
+      - name: Stop server
+        if: always()
+        run: pkill x2s || true
+
+      - name: Upload benchmark results
+        uses: actions/upload-artifact@v4
+        with:
+          name: benchmark-results
+          path: benchmark-results.txt
+          retention-days: 30
+
+      - name: Comment benchmark results on PR
+        if: github.event_name == 'pull_request'
+        uses: actions/github-script@v7
+        with:
+          script: |
+            const fs = require('fs');
+            const results = fs.readFileSync('benchmark-results.txt', 'utf8');
+            github.rest.issues.createComment({
+              issue_number: context.issue.number,
+              owner: context.repo.owner,
+              repo: context.repo.repo,
+              body: '## Performance Benchmark Results\n\n```\n' + results + '\n```'
+            });
+
+  memory-leak-detection:
+    name: Memory Leak Detection (Valgrind)
+    runs-on: ubuntu-latest
+
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v4
+
+      - name: Install dependencies
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y libmicrohttpd-dev libssl-dev cmake valgrind curl jq
+
+      - name: Build debug binary
+        run: |
+          cmake -B build -DCMAKE_BUILD_TYPE=Debug
+          cmake --build build
+
+      - name: Run Valgrind memory check
+        run: |
+          valgrind --leak-check=full \
+                   --show-leak-kinds=all \
+                   --track-origins=yes \
+                   --verbose \
+                   --log-file=valgrind-out.txt \
+                   --error-exitcode=1 \
+                   timeout 10 ./build/x2s || true
+
+      - name: Check for memory leaks
+        run: |
+          cat valgrind-out.txt
+          if grep -q "ERROR SUMMARY: 0 errors" valgrind-out.txt; then
+            echo "✓ No memory leaks detected"
+          else
+            echo "⚠ Memory issues found - review valgrind-out.txt"
+            exit 1
+          fi
+
+      - name: Upload Valgrind report
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: valgrind-report
+          path: valgrind-out.txt
+          retention-days: 30

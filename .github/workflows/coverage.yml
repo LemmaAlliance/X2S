@@ -1,0 +1,122 @@
+name: Code Coverage
+
+on:
+  push:
+    branches: [ "master" ]
+  pull_request:
+    branches: [ "master" ]
+
+permissions:
+  contents: read
+
+jobs:
+  coverage:
+    name: Generate Coverage Report
+    runs-on: ubuntu-latest
+
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v4
+
+      - name: Install dependencies
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y libmicrohttpd-dev libssl-dev cmake gcov lcov curl jq
+
+      - name: Build with coverage instrumentation
+        run: |
+          cmake -B build -DCMAKE_BUILD_TYPE=Debug -DENABLE_COVERAGE=ON -DENABLE_TESTING=ON
+          cmake --build build
+
+      - name: Prepare config
+        run: cp config.example.json config.json
+
+      - name: Start server
+        run: |
+          ./build/x2s --config config.json &
+          sleep 2
+
+      - name: Run E2E tests to generate coverage
+        run: |
+          # Create account
+          RESPONSE=$(curl -s -f -X POST http://localhost:8080/auth/register -d 'username=coverage_user&password=covpass123')
+          TOKEN=$(echo "$RESPONSE" | jq -r '.token')
+          
+          # Upload file
+          UPLOAD=$(curl -s -f -X POST http://localhost:8080/objects \
+            -H "Authorization: Bearer $TOKEN" \
+            -H 'X-Filename: coverage.txt' \
+            -H 'X-Category: test' \
+            -H 'X-Extension: txt' \
+            -d 'Coverage test data')
+          ID=$(echo "$UPLOAD" | jq -r '.id')
+          
+          # List objects
+          curl -s -H "Authorization: Bearer $TOKEN" http://localhost:8080/objects
+          
+          # Download file
+          curl -s -H "Authorization: Bearer $TOKEN" http://localhost:8080/objects/$ID
+          
+          # Share object (if sharing is implemented)
+          curl -s -X POST http://localhost:8080/objects/$ID/share \
+            -H "Authorization: Bearer $TOKEN" \
+            -d 'user_id=0000000000000000000000000000000000000000000000000000000000000000&permissions=1' || true
+          
+          # Delete file
+          curl -s -X DELETE -H "Authorization: Bearer $TOKEN" http://localhost:8080/objects/$ID
+          
+          # Logout
+          curl -s -X POST http://localhost:8080/auth/logout -H "Authorization: Bearer $TOKEN"
+
+      - name: Stop server
+        if: always()
+        run: |
+          pkill x2s || true
+          sleep 1
+
+      - name: Generate coverage report
+        run: |
+          cd build
+          lcov --capture --directory . --output-file coverage.info
+          lcov --remove coverage.info '/usr/*' '*/external/*' '*/cJSON.*' --output-file coverage_filtered.info
+          lcov --list coverage_filtered.info
+
+      - name: Generate HTML coverage report
+        run: |
+          cd build
+          genhtml coverage_filtered.info --output-directory coverage_html
+
+      - name: Upload coverage HTML report
+        uses: actions/upload-artifact@v4
+        with:
+          name: coverage-report
+          path: build/coverage_html
+          retention-days: 30
+
+      - name: Display coverage summary
+        run: |
+          cd build
+          echo "=== Coverage Summary ==="
+          lcov --summary coverage_filtered.info
+
+      - name: Check coverage threshold
+        run: |
+          cd build
+          COVERAGE=$(lcov --summary coverage_filtered.info 2>&1 | grep "lines" | cut -d: -f2 | cut -d% -f1 | tr -d ' ')
+          echo "Overall line coverage: ${COVERAGE}%"
+          
+          # Info only - don't fail on low coverage yet
+          if (( $(echo "$COVERAGE < 50" | bc -l) )); then
+            echo "⚠ Warning: Coverage is below 50%"
+          else
+            echo "✓ Coverage is ${COVERAGE}%"
+          fi
+
+      - name: Upload to Codecov (optional - requires CODECOV_TOKEN secret)
+        if: env.CODECOV_TOKEN != ''
+        uses: codecov/codecov-action@v4
+        env:
+          CODECOV_TOKEN: ${{ secrets.CODECOV_TOKEN }}
+        with:
+          files: build/coverage_filtered.info
+          fail_ci_if_error: false
