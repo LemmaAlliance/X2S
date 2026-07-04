@@ -1,0 +1,177 @@
+name: Release
+
+on:
+  push:
+    tags:
+      - 'v*'
+  workflow_dispatch:
+    inputs:
+      version:
+        description: 'Version tag (e.g., v1.0.0)'
+        required: true
+
+permissions:
+  contents: write
+
+jobs:
+  build-release-binaries:
+    name: Build ${{ matrix.name }}
+    runs-on: ubuntu-latest
+    
+    strategy:
+      matrix:
+        include:
+          - name: ubuntu-20.04
+            container: ubuntu:20.04
+            artifact: x2s-ubuntu-20.04-amd64
+          - name: ubuntu-22.04
+            container: ubuntu:22.04
+            artifact: x2s-ubuntu-22.04-amd64
+          - name: debian-bullseye
+            container: debian:bullseye
+            artifact: x2s-debian-bullseye-amd64
+          - name: debian-bookworm
+            container: debian:bookworm
+            artifact: x2s-debian-bookworm-amd64
+          - name: fedora-latest
+            container: fedora:latest
+            artifact: x2s-fedora-latest-x86_64
+
+    container: ${{ matrix.container }}
+
+    steps:
+      - name: Install git (Ubuntu/Debian)
+        if: startsWith(matrix.name, 'ubuntu') || startsWith(matrix.name, 'debian')
+        run: |
+          apt-get update
+          apt-get install -y git
+
+      - name: Install git (Fedora)
+        if: startsWith(matrix.name, 'fedora')
+        run: dnf install -y git
+
+      - name: Checkout code
+        uses: actions/checkout@v4
+
+      - name: Install build dependencies (Ubuntu/Debian)
+        if: startsWith(matrix.name, 'ubuntu') || startsWith(matrix.name, 'debian')
+        run: |
+          apt-get update
+          apt-get install -y build-essential cmake libmicrohttpd-dev libssl-dev pkg-config file
+
+      - name: Install build dependencies (Fedora)
+        if: startsWith(matrix.name, 'fedora')
+        run: |
+          dnf install -y gcc gcc-c++ cmake libmicrohttpd-devel openssl-devel pkgconfig file
+
+      - name: Build static binary
+        run: |
+          cmake -B build -DCMAKE_BUILD_TYPE=Release -DCMAKE_EXE_LINKER_FLAGS="-static-libgcc"
+          cmake --build build --config Release
+          strip build/x2s
+
+      - name: Package binary
+        run: |
+          mkdir -p release
+          cp build/x2s release/
+          cp README.md LICENSE release/
+          cp config.example.json release/
+          tar czf ${{ matrix.artifact }}.tar.gz -C release .
+
+      - name: Verify binary
+        run: |
+          file build/x2s
+          ldd build/x2s || true
+          ./build/x2s --help || echo "No --help flag"
+
+      - name: Upload artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: ${{ matrix.artifact }}
+          path: ${{ matrix.artifact }}.tar.gz
+
+  create-release:
+    name: Create GitHub Release
+    needs: build-release-binaries
+    runs-on: ubuntu-latest
+
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+
+      - name: Download all artifacts
+        uses: actions/download-artifact@v4
+        with:
+          path: artifacts
+
+      - name: Generate changelog
+        id: changelog
+        run: |
+          # Get the previous tag
+          PREV_TAG=$(git describe --tags --abbrev=0 HEAD^ 2>/dev/null || echo "")
+          CURRENT_TAG=${GITHUB_REF#refs/tags/}
+          
+          if [ -z "$PREV_TAG" ]; then
+            echo "First release"
+            CHANGELOG="Initial release of X2S"
+          else
+            echo "Generating changelog from $PREV_TAG to $CURRENT_TAG"
+            CHANGELOG=$(git log --pretty=format:"- %s (%h)" $PREV_TAG..$CURRENT_TAG)
+          fi
+          
+          # Save to file
+          echo "$CHANGELOG" > CHANGELOG.md
+          
+          # Also create release notes
+          cat > RELEASE_NOTES.md <<EOF
+          # X2S ${CURRENT_TAG}
+          
+          ## Changes
+          
+          $CHANGELOG
+          
+          ## Downloads
+          
+          Choose the binary for your Linux distribution:
+          
+          - **Ubuntu 20.04**: \`x2s-ubuntu-20.04-amd64.tar.gz\`
+          - **Ubuntu 22.04**: \`x2s-ubuntu-22.04-amd64.tar.gz\`
+          - **Debian Bullseye**: \`x2s-debian-bullseye-amd64.tar.gz\`
+          - **Debian Bookworm**: \`x2s-debian-bookworm-amd64.tar.gz\`
+          - **Fedora Latest**: \`x2s-fedora-latest-x86_64.tar.gz\`
+          
+          ## Installation
+          
+          \`\`\`bash
+          # Extract the archive
+          tar xzf x2s-*.tar.gz
+          
+          # Run the server
+          ./x2s
+          \`\`\`
+          
+          ## Documentation
+          
+          See the [README](https://github.com/${{ github.repository }}/blob/${CURRENT_TAG}/README.md) for full documentation.
+          EOF
+
+      - name: Create release
+        uses: softprops/action-gh-release@v1
+        with:
+          files: artifacts/**/*.tar.gz
+          body_path: RELEASE_NOTES.md
+          draft: false
+          prerelease: ${{ contains(github.ref, 'alpha') || contains(github.ref, 'beta') || contains(github.ref, 'rc') }}
+          generate_release_notes: true
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+
+      - name: Upload changelog artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: changelog
+          path: |
+            CHANGELOG.md
+            RELEASE_NOTES.md

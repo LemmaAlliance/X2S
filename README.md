@@ -195,6 +195,64 @@ cmake -S . -B build && cmake --build build
 
 ```
 
+## CI/CD Pipeline
+
+X2S uses GitHub Actions for continuous integration and deployment.
+
+### Workflows
+
+* **CI Build and Test** (`.github/workflows/ci.yml`)
+  - Tests on Ubuntu (20.04, 22.04, latest), Debian (bullseye, bookworm), Fedora (latest)
+  - Builds with GCC and Clang compilers
+  - Runs sanitizer builds (AddressSanitizer, UndefinedBehaviorSanitizer)
+  - Executes end-to-end tests
+  - Ready for future unit test integration via CTest
+
+* **Code Quality** (`.github/workflows/code-quality.yml`)
+  - clang-format checks for consistent code style
+  - clang-tidy static analysis
+  - CodeQL security scanning
+  - shellcheck for shell scripts
+
+* **Code Coverage** (`.github/workflows/coverage.yml`)
+  - Generates coverage reports with gcov/lcov
+  - Uploads HTML reports as artifacts
+  - Optional Codecov integration
+
+* **Performance Benchmarks** (`.github/workflows/performance.yml`)
+  - Measures authentication throughput
+  - Tests upload/download speeds
+  - Checks concurrent request handling
+  - Runs Valgrind memory leak detection
+  - Posts results as PR comments
+
+* **Release** (`.github/workflows/release.yml`)
+  - Triggers on version tags (e.g., `v1.0.0`)
+  - Builds binaries for multiple Linux distributions
+  - Generates changelog from commits
+  - Creates GitHub releases with artifacts
+
+### Running Tests Locally
+
+```bash
+# Build with testing and coverage enabled
+cmake -B build -DENABLE_TESTING=ON -ENABLE_COVERAGE=ON
+cmake --build build
+
+# Run E2E tests (requires server running)
+./e2e_local.sh
+
+# Run performance benchmarks
+./tests/benchmark.sh <auth_token>
+
+# Check code formatting
+find src -name '*.c' -o -name '*.h' | xargs clang-format -i
+
+# Run static analysis
+cmake -B build -DCMAKE_EXPORT_COMPILE_COMMANDS=ON
+clang-tidy src/*.c -p build
+```
+
 ## Design notes
 
 * **Single-threaded** — libmicrohttpd internal polling thread handles all I/O. No locking, no concurrent access safety.
