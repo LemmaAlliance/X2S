@@ -143,6 +143,7 @@ static enum MHD_Result handle_put(struct MHD_Connection *conn,
 
   if (!put_object(server->store, &user, &obj)) {
     fclose(ub->fp);
+    ub->fp = NULL;
     return send_error_cors(conn, server->cors_origin, MHD_HTTP_INTERNAL_SERVER_ERROR,
                       "failed to store object");
   }
