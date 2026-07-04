@@ -77,3 +77,28 @@ target_compile_options(x2s PRIVATE
     -Wall -Wextra -Wpedantic
     ${MHD_CFLAGS_OTHER}
 )
+
+# =============================================================================
+# Testing support
+# =============================================================================
+
+option(ENABLE_TESTING "Enable CTest integration for unit tests" OFF)
+option(ENABLE_COVERAGE "Enable code coverage instrumentation" OFF)
+
+if(ENABLE_TESTING)
+    enable_testing()
+    # Tests directory for future unit tests
+    # add_subdirectory(tests) # Uncomment when unit tests are added
+    message(STATUS "CTest enabled - ready for unit test integration")
+endif()
+
+# Code coverage support (GCC/Clang with gcov)
+if(ENABLE_COVERAGE)
+    if(CMAKE_C_COMPILER_ID MATCHES "GNU|Clang")
+        target_compile_options(x2s PRIVATE --coverage -O0 -g)
+        target_link_options(x2s PRIVATE --coverage)
+        message(STATUS "Code coverage enabled")
+    else()
+        message(WARNING "Code coverage requested but compiler doesn't support --coverage flag")
+    endif()
+endif()

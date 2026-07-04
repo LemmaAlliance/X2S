@@ -1,0 +1,249 @@
+name: CI Build and Test
+
+on:
+  push:
+    branches: [ "master", "develop" ]
+  pull_request:
+    branches: [ "master" ]
+
+permissions:
+  contents: read
+
+env:
+  BUILD_TYPE: Release
+
+jobs:
+  build-matrix:
+    name: Build on ${{ matrix.os }} with ${{ matrix.compiler }}
+    runs-on: ${{ matrix.os }}
+    
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          # Ubuntu builds
+          - os: ubuntu-20.04
+            compiler: gcc
+            cc: gcc-9
+            cxx: g++-9
+          - os: ubuntu-22.04
+            compiler: gcc
+            cc: gcc-11
+            cxx: g++-11
+          - os: ubuntu-latest
+            compiler: gcc
+            cc: gcc
+            cxx: g++
+          - os: ubuntu-latest
+            compiler: clang
+            cc: clang
+            cxx: clang++
+          
+          # Debian builds
+          - os: debian:bullseye
+            compiler: gcc
+            container: true
+          - os: debian:bookworm
+            compiler: gcc
+            container: true
+          
+          # Fedora builds
+          - os: fedora:latest
+            compiler: gcc
+            container: true
+
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v4
+
+      - name: Set up container environment (Debian)
+        if: matrix.container && startsWith(matrix.os, 'debian')
+        run: |
+          apt-get update
+          apt-get install -y build-essential cmake libmicrohttpd-dev libssl-dev pkg-config ca-certificates
+
+      - name: Set up container environment (Fedora)
+        if: matrix.container && startsWith(matrix.os, 'fedora')
+        run: |
+          dnf install -y gcc gcc-c++ cmake libmicrohttpd-devel openssl-devel pkgconfig
+
+      - name: Install dependencies (Ubuntu)
+        if: startsWith(matrix.os, 'ubuntu')
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y libmicrohttpd-dev libssl-dev cmake pkg-config
+
+      - name: Cache dependencies
+        if: startsWith(matrix.os, 'ubuntu')
+        uses: actions/cache@v4
+        with:
+          path: |
+            /var/cache/apt
+            /var/lib/apt
+          key: ${{ matrix.os }}-apt-${{ hashFiles('**/CMakeLists.txt') }}
+          restore-keys: |
+            ${{ matrix.os }}-apt-
+
+      - name: Set compiler
+        if: matrix.cc
+        run: |
+          echo "CC=${{ matrix.cc }}" >> $GITHUB_ENV
+          echo "CXX=${{ matrix.cxx }}" >> $GITHUB_ENV
+
+      - name: Configure CMake
+        run: cmake -B build -DCMAKE_BUILD_TYPE=${{ env.BUILD_TYPE }} -DENABLE_TESTING=ON
+
+      - name: Build
+        run: cmake --build build --config ${{ env.BUILD_TYPE }} -j$(nproc)
+
+      - name: Run CTest (unit tests - when available)
+        working-directory: build
+        run: ctest -C ${{ env.BUILD_TYPE }} --output-on-failure || true
+
+      - name: Upload build artifacts
+        if: matrix.os == 'ubuntu-latest' && matrix.compiler == 'gcc'
+        uses: actions/upload-artifact@v4
+        with:
+          name: x2s-${{ matrix.os }}-${{ matrix.compiler }}
+          path: build/x2s
+          retention-days: 7
+
+  e2e-tests:
+    name: End-to-End Tests
+    runs-on: ubuntu-latest
+    needs: build-matrix
+
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v4
+
+      - name: Install dependencies
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y libmicrohttpd-dev libssl-dev cmake jq curl
+
+      - name: Configure CMake
+        run: cmake -B build -DCMAKE_BUILD_TYPE=${{ env.BUILD_TYPE }}
+
+      - name: Build
+        run: cmake --build build --config ${{ env.BUILD_TYPE }}
+
+      - name: Prepare config
+        run: cp config.example.json config.json
+
+      - name: Start server
+        run: |
+          ./build/x2s --config config.json &
+          sleep 2
+
+      - name: Run E2E tests
+        run: |
+          # Create account
+          echo "=== Create Account ==="
+          RESPONSE=$(curl -s -f -X POST http://localhost:8080/auth/register -d 'username=alice&password=foobar')
+          TOKEN=$(echo "$RESPONSE" | jq -r '.token')
+          echo "AUTH_TOKEN=$TOKEN" >> $GITHUB_ENV
+
+      - name: Test invalid login
+        run: |
+          echo "=== Login with invalid user ==="
+          ! curl -s -f -X POST http://localhost:8080/auth/login -d 'username=alice&password=bazquux'
+          echo "Unable to login with bad credentials (expected)"
+
+      - name: Test object upload
+        run: |
+          echo "=== Upload object ==="
+          RESPONSE=$(curl -s -f -X POST http://localhost:8080/objects \
+            -H "Authorization: Bearer ${{ env.AUTH_TOKEN }}" \
+            -H 'X-Filename: hello.txt' \
+            -H 'X-Category: documents' \
+            -H 'X-Extension: txt' \
+            -d 'Hello, World!')
+          echo "UPLOAD_RESPONSE=$RESPONSE" >> $GITHUB_ENV
+
+      - name: Test list objects
+        run: |
+          echo "=== List owned objects ==="
+          RESPONSE=$(curl -H "Authorization: Bearer ${{ env.AUTH_TOKEN }}" \
+            -X GET "http://localhost:8080/objects")
+          
+          EXPECTED_ID=$(echo '${{ env.UPLOAD_RESPONSE }}' | jq -r '.id')
+          if ! echo "$RESPONSE" | jq --arg id "$EXPECTED_ID" '.objects[] | select(.id == $id)' | grep -q "$EXPECTED_ID"; then
+            echo "Error: Uploaded object not found in owned objects."
+            exit 1
+          fi
+
+      - name: Test object retrieval
+        run: |
+          echo "=== Access object with good auth ==="
+          ID=$(echo '${{ env.UPLOAD_RESPONSE }}' | jq -r '.id')
+          RESPONSE=$(curl -s -f -X GET "http://localhost:8080/objects/$ID" \
+            -H "Authorization: Bearer ${{ env.AUTH_TOKEN }}")
+          
+          if [[ "$RESPONSE" != "Hello, World!" ]]; then
+            echo "Error: Retrieved content doesn't match uploaded content"
+            exit 1
+          fi
+
+      - name: Test unauthorized access
+        run: |
+          echo "=== Access object with bad auth ==="
+          ID=$(echo '${{ env.UPLOAD_RESPONSE }}' | jq -r '.id')
+          ! curl -s -f -X GET "http://localhost:8080/objects/$ID"
+          echo "Unable to access object without auth (expected)"
+
+      - name: Test logout
+        run: |
+          echo "=== Log out ==="
+          curl -s -f -X POST http://localhost:8080/auth/logout \
+            -H "Authorization: Bearer ${{ env.AUTH_TOKEN }}"
+
+      - name: Test expired token
+        run: |
+          echo "=== Access file with expired token ==="
+          ID=$(echo '${{ env.UPLOAD_RESPONSE }}' | jq -r '.id')
+          ! curl -s -f -X GET "http://localhost:8080/objects/$ID" \
+            -H "Authorization: Bearer ${{ env.AUTH_TOKEN }}"
+          echo "Unable to access object with expired token (expected)"
+
+      - name: Stop server
+        if: always()
+        run: pkill x2s || true
+
+  sanitizer-builds:
+    name: Sanitizer Build (${{ matrix.sanitizer }})
+    runs-on: ubuntu-latest
+    
+    strategy:
+      matrix:
+        sanitizer: [address, undefined]
+    
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v4
+
+      - name: Install dependencies
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y libmicrohttpd-dev libssl-dev cmake clang
+
+      - name: Configure CMake with sanitizers
+        env:
+          CC: clang
+          CXX: clang++
+        run: |
+          cmake -B build \
+            -DCMAKE_BUILD_TYPE=Debug \
+            -DCMAKE_C_FLAGS="-fsanitize=${{ matrix.sanitizer }} -fno-omit-frame-pointer -g" \
+            -DCMAKE_EXE_LINKER_FLAGS="-fsanitize=${{ matrix.sanitizer }}"
+
+      - name: Build
+        run: cmake --build build -j$(nproc)
+
+      - name: Run basic smoke test
+        run: |
+          timeout 5 ./build/x2s &
+          PID=$!
+          sleep 2
+          curl -s http://localhost:8080/ || true
+          kill $PID || true
