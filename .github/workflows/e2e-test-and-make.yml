@@ -2,7 +2,7 @@ name: Run end to end tests
 
 on:
   push:
-    branches: [ "master", "Bigger-Uploads" ]
+    branches: [ "master", "Bigger-Uploads", "4-more-options-from-cli" ]
   pull_request:
     branches: [ "master" ]
 
@@ -28,9 +28,13 @@ jobs:
       - name: Build
         run: cmake --build ${{github.workspace}}/build --config ${{env.BUILD_TYPE}}
 
+      - name: Move example config
+        run: |
+          mv config.example.json config.json
+
       - name: Start Server
         run: |
-          ${{github.workspace}}/build/x2s &
+          ${{github.workspace}}/build/x2s --config config.json &
           # Give the background server 2 seconds to boot before curl hits it
           sleep 2 
 

@@ -71,6 +71,7 @@ static enum MHD_Result handle_put(struct MHD_Connection *conn,
     FileUploadBuffer *ub = calloc(1, sizeof(FileUploadBuffer));
     if (!ub)
       return MHD_NO;
+    ub->type = BUFFER_TYPE_FILE_UPLOAD;
     *con_cls = ub;
     return MHD_YES;
   }
@@ -83,7 +84,12 @@ static enum MHD_Result handle_put(struct MHD_Connection *conn,
 
     /* Initialize temporary file */
     if (ub->fp == NULL) {
-      char template[] = "/tmp/upload_XXXXXX";
+      char template[4096];
+      int n = snprintf(template, sizeof(template), "%s/upload_XXXXXX", server->temporary_directory);
+      if (n < 0 || (size_t)n >= sizeof(template)) {
+        return send_error_cors(conn, server->cors_origin, MHD_HTTP_INTERNAL_SERVER_ERROR,
+                               "Temporary directory path too long");
+      }
       int fd = mkstemp(template);
       if (fd == -1) {
         return send_error_cors(
@@ -139,9 +145,16 @@ static enum MHD_Result handle_put(struct MHD_Connection *conn,
   User user;
   get_user_from_request(conn, &user, server->tokens);
 
-  if (!put_object(server->store, &user, &obj))
+  if (!put_object(server->store, &user, &obj)) {
+    fclose(ub->fp);
+    ub->fp = NULL;
     return send_error_cors(conn, server->cors_origin, MHD_HTTP_INTERNAL_SERVER_ERROR,
                       "failed to store object");
+  }
+
+  /* Close temporary file after successful storage */
+  fclose(ub->fp);
+  ub->fp = NULL;
 
   /* Build response: {"id":"<64 hex chars>"}*/
   char json[80];
@@ -367,6 +380,7 @@ static enum MHD_Result handle_auth_register(struct MHD_Connection *conn,
     UploadBuffer *ub = calloc(1, sizeof(UploadBuffer));
     if (!ub)
       return MHD_NO;
+    ub->type = BUFFER_TYPE_UPLOAD;
     *con_cls = ub;
     return MHD_YES;
   }
@@ -463,6 +477,7 @@ static enum MHD_Result handle_auth_login(struct MHD_Connection *conn,
     UploadBuffer *ub = calloc(1, sizeof(UploadBuffer));
     if (!ub)
       return MHD_NO;
+    ub->type = BUFFER_TYPE_UPLOAD;
     *con_cls = ub;
     return MHD_YES;
   }
@@ -573,6 +588,7 @@ static enum MHD_Result handle_share(struct MHD_Connection *conn,
   if (!*con_cls) {
     UploadBuffer *ub = calloc(1, sizeof(UploadBuffer));
     if (!ub) return MHD_NO;
+    ub->type = BUFFER_TYPE_UPLOAD;
     *con_cls = ub;
     return MHD_YES;
   }
@@ -759,7 +775,6 @@ static void request_completed(void *cls, struct MHD_Connection *conn,
     return;
 
   /*
-   * Only PUT and POST auth requests allocate a real UploadBuffer.
    * GET/DELETE/logout use the sentinel value 1.
    */
   if (*con_cls == (void *)1) {
@@ -767,9 +782,26 @@ static void request_completed(void *cls, struct MHD_Connection *conn,
     return;
   }
 
-  UploadBuffer *ub = *con_cls;
-  free(ub->buf);
-  free(ub);
+  /*
+   * Safely distinguish between UploadBuffer and FileUploadBuffer using type tag.
+   * Both structures have BufferType as their first field.
+   */
+  BufferType *type_ptr = (BufferType *)*con_cls;
+  
+  if (*type_ptr == BUFFER_TYPE_UPLOAD) {
+    /* This is an UploadBuffer (auth handlers) */
+    UploadBuffer *ub = (UploadBuffer *)*con_cls;
+    free(ub->buf);
+    free(ub);
+  } else if (*type_ptr == BUFFER_TYPE_FILE_UPLOAD) {
+    /* This is a FileUploadBuffer (file uploads) */
+    FileUploadBuffer *fub = (FileUploadBuffer *)*con_cls;
+    if (fub->fp != NULL) {
+      fclose(fub->fp);
+    }
+    free(fub);
+  }
+  
   *con_cls = NULL;
 }
 
@@ -777,8 +809,8 @@ static void request_completed(void *cls, struct MHD_Connection *conn,
  * Public API
  * ---------------------------------------------------------------------- */
 
-ApiServer *api_server_start(unsigned int port, const char *cors_origin, ObjectStore *store,
-                            TokenStore *tokens) {
+ApiServer *api_server_start(unsigned int port, const char *cors_origin, const char *temporary_directory,
+                            ObjectStore *store, TokenStore *tokens) {
   if (!store)
     return NULL;
 
@@ -789,6 +821,7 @@ ApiServer *api_server_start(unsigned int port, const char *cors_origin, ObjectSt
   server->store = store;
   server->tokens = tokens;
   server->cors_origin = cors_origin; /* Track dynamic value safely here */
+  server->temporary_directory = temporary_directory;
 
   /*
    * MHD_USE_INTERNAL_POLLING_THREAD: MHD manages its own thread so

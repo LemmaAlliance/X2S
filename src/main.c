@@ -1,13 +1,14 @@
 #include "api_server.h"
 #include "auth.h"
+#include "cli_setup.h"
 #include "obj_operations.h"
+#include <errno.h>
 #include <signal.h>
 #include <stdio.h>
 #include <stdlib.h>
+#include <sys/stat.h>
 #include <unistd.h>
 
-#define DEFAULT_PORT 8080
-#define DEFAULT_CORS "*"
 #define MAIN_SLEEP_MS 100000
 
 static volatile int running = 1;
@@ -18,28 +19,24 @@ static void handle_sigint(int sig) {
 }
 
 int main(int argc, char *argv[]) {
-  unsigned int port = DEFAULT_PORT;
-  char *cors_origin = DEFAULT_CORS;
-  int opt;
+  CliConfig config;
 
-  // Process standard switch options cleanly
-  while ((opt = getopt(argc, argv, "p:c:")) != -1) {
-    switch (opt) {
-      case 'p':
-        port = (unsigned int)atoi(optarg);
-        break;
-      case 'c':
-        cors_origin = optarg;
-        break;
-      default:
-        fprintf(stderr, "Usage: %s [-p port] [-c cors_origin]\n", argv[0]);
-        return 1;
-    }
+  if (cli_setup_parse(argc, argv, &config) != 0) {
+    return 1;
   }
+
+  unsigned int port = config.port;
+  const char *cors_origin = config.cors_origin;
 
   printf("Welcome to X2S — eXtremely Simple Storage\n");
 
-  ObjectStore *store = create_store(16, "./x2s_data");
+  /* Ensure temporary directory exists */
+  if (mkdir(config.temporary_directory, 0755) != 0 && errno != EEXIST) {
+    fprintf(stderr, "Failed to create temporary directory: %s\n", config.temporary_directory);
+    return 1;
+  }
+
+  ObjectStore *store = create_store(16, config.data_directory);
   if (!store) {
     fprintf(stderr, "Failed to create object store\n");
     return 1;
@@ -65,7 +62,7 @@ int main(int argc, char *argv[]) {
   TokenStore tokens = {.users = users, .sessions = sessions};
 
   // Pass dynamic port configuration alongside the custom string assignment down safely
-  ApiServer *api = api_server_start(port, cors_origin, store, &tokens);
+  ApiServer *api = api_server_start(port, cors_origin, config.temporary_directory, store, &tokens);
   if (!api) {
     fprintf(stderr, "Failed to start API server on port %u\n", port);
     session_store_free(sessions);
@@ -76,6 +73,8 @@ int main(int argc, char *argv[]) {
 
   printf("Listening on http://0.0.0.0:%u\n", port);
   printf("Allowed CORS Origin: %s\n", cors_origin);
+  printf("Data directory: %s\n", config.data_directory);
+  printf("Temporary directory: %s\n", config.temporary_directory);
   printf("  POST  /auth/register      register a new user\n");
   printf("  POST  /auth/login          authenticate and get a token\n");
   printf("  POST  /auth/logout         invalidate a token\n");

@@ -11,11 +11,17 @@
  * Internal types
  * ---------------------------------------------------------------------- */
 
+typedef enum {
+  BUFFER_TYPE_UPLOAD,      /* UploadBuffer: in-memory buffer for auth requests */
+  BUFFER_TYPE_FILE_UPLOAD  /* FileUploadBuffer: temporary file for object uploads */
+} BufferType;
+
 struct ApiServer {
   struct MHD_Daemon *daemon;
   ObjectStore *store;
   TokenStore *tokens;
   const char *cors_origin;
+  const char *temporary_directory;
 };
 
 /*
@@ -23,12 +29,14 @@ struct ApiServer {
  * Allocated on first upload_data chunk, freed by the completed callback.
  */
 typedef struct {
+  BufferType type;  /* MUST be first field */
   char *buf;
   size_t len;
   size_t cap;
 } UploadBuffer;
 
 typedef struct {
+  BufferType type;  /* MUST be first field */
   FILE *fp;
   size_t len;
 } FileUploadBuffer;

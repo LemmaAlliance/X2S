@@ -1,0 +1,6 @@
+{
+  "port": 8080,
+  "cors_origin": "*",
+  "data_directory": "./x2s_data",
+  "temporary_directory": "/tmp/x2s"
+}
