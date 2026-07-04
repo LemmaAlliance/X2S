@@ -83,7 +83,8 @@ static enum MHD_Result handle_put(struct MHD_Connection *conn,
 
     /* Initialize temporary file */
     if (ub->fp == NULL) {
-      char template[] = "/tmp/upload_XXXXXX";
+      char template[4096];
+      snprintf(template, sizeof(template), "%s/upload_XXXXXX", server->temporary_directory);
       int fd = mkstemp(template);
       if (fd == -1) {
         return send_error_cors(
@@ -139,9 +140,15 @@ static enum MHD_Result handle_put(struct MHD_Connection *conn,
   User user;
   get_user_from_request(conn, &user, server->tokens);
 
-  if (!put_object(server->store, &user, &obj))
+  if (!put_object(server->store, &user, &obj)) {
+    fclose(ub->fp);
     return send_error_cors(conn, server->cors_origin, MHD_HTTP_INTERNAL_SERVER_ERROR,
                       "failed to store object");
+  }
+
+  /* Close temporary file after successful storage */
+  fclose(ub->fp);
+  ub->fp = NULL;
 
   /* Build response: {"id":"<64 hex chars>"}*/
   char json[80];
@@ -767,9 +774,23 @@ static void request_completed(void *cls, struct MHD_Connection *conn,
     return;
   }
 
+  /*
+   * Distinguish between UploadBuffer (auth handlers) and FileUploadBuffer (file uploads).
+   * FileUploadBuffer has a FILE* pointer that needs to be closed.
+   */
   UploadBuffer *ub = *con_cls;
-  free(ub->buf);
-  free(ub);
+  if (ub->buf != NULL) {
+    /* This is an UploadBuffer (auth handlers) */
+    free(ub->buf);
+    free(ub);
+  } else {
+    /* This is a FileUploadBuffer (file uploads) */
+    FileUploadBuffer *fub = (FileUploadBuffer *)*con_cls;
+    if (fub->fp != NULL) {
+      fclose(fub->fp);
+    }
+    free(fub);
+  }
   *con_cls = NULL;
 }
 
@@ -777,8 +798,8 @@ static void request_completed(void *cls, struct MHD_Connection *conn,
  * Public API
  * ---------------------------------------------------------------------- */
 
-ApiServer *api_server_start(unsigned int port, const char *cors_origin, ObjectStore *store,
-                            TokenStore *tokens) {
+ApiServer *api_server_start(unsigned int port, const char *cors_origin, const char *temporary_directory,
+                            ObjectStore *store, TokenStore *tokens) {
   if (!store)
     return NULL;
 
@@ -789,6 +810,7 @@ ApiServer *api_server_start(unsigned int port, const char *cors_origin, ObjectSt
   server->store = store;
   server->tokens = tokens;
   server->cors_origin = cors_origin; /* Track dynamic value safely here */
+  server->temporary_directory = temporary_directory;
 
   /*
    * MHD_USE_INTERNAL_POLLING_THREAD: MHD manages its own thread so

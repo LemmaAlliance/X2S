@@ -16,6 +16,7 @@ struct ApiServer {
   ObjectStore *store;
   TokenStore *tokens;
   const char *cors_origin;
+  const char *temporary_directory;
 };
 
 /*

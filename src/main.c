@@ -2,9 +2,11 @@
 #include "auth.h"
 #include "cli_setup.h"
 #include "obj_operations.h"
+#include <errno.h>
 #include <signal.h>
 #include <stdio.h>
 #include <stdlib.h>
+#include <sys/stat.h>
 #include <unistd.h>
 
 #define MAIN_SLEEP_MS 100000
@@ -27,6 +29,12 @@ int main(int argc, char *argv[]) {
   const char *cors_origin = config.cors_origin;
 
   printf("Welcome to X2S — eXtremely Simple Storage\n");
+
+  /* Ensure temporary directory exists */
+  if (mkdir(config.temporary_directory, 0755) != 0 && errno != EEXIST) {
+    fprintf(stderr, "Failed to create temporary directory: %s\n", config.temporary_directory);
+    return 1;
+  }
 
   ObjectStore *store = create_store(16, config.data_directory);
   if (!store) {
@@ -54,7 +62,7 @@ int main(int argc, char *argv[]) {
   TokenStore tokens = {.users = users, .sessions = sessions};
 
   // Pass dynamic port configuration alongside the custom string assignment down safely
-  ApiServer *api = api_server_start(port, cors_origin, store, &tokens);
+  ApiServer *api = api_server_start(port, cors_origin, config.temporary_directory, store, &tokens);
   if (!api) {
     fprintf(stderr, "Failed to start API server on port %u\n", port);
     session_store_free(sessions);

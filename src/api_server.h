@@ -50,7 +50,8 @@ typedef struct ApiServer ApiServer;
 /*
  * Create and start the HTTP server on the given port and with the specified CORS origin.
  */
-ApiServer *api_server_start(unsigned int port, const char *cors_origin, ObjectStore *store, TokenStore *tokens);
+ApiServer *api_server_start(unsigned int port, const char *cors_origin, const char *temporary_directory,
+                            ObjectStore *store, TokenStore *tokens);
 
 /*
  * Stop the server and free all resources.
