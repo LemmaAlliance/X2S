@@ -41,6 +41,7 @@ typedef struct {
   size_t len;
 } FileUploadBuffer;
 
+char *json_escape(const char *s);
 const char *mime_for_extension(const char *ext);
 enum MHD_Result send_error(struct MHD_Connection *conn,
                                   unsigned int status, const char *msg);

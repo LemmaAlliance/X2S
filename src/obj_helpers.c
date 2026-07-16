@@ -30,6 +30,12 @@ void free_metadata(Metadata *metadata) {
     free(metadata->category);
     free(metadata->extension);
     free(metadata->filename);
+    for (size_t i = 0; i < metadata->metadata_count; i++) {
+        free(metadata->metadata_keys ? metadata->metadata_keys[i] : NULL);
+        free(metadata->metadata_values ? metadata->metadata_values[i] : NULL);
+    }
+    free(metadata->metadata_keys);
+    free(metadata->metadata_values);
     free(metadata);
 }
 
@@ -107,6 +113,20 @@ int compute_object_id(User *user, Object *obj, unsigned char out[32]) {
                               strlen(obj->metadata->filename))) {
             EVP_MD_CTX_free(ctx);
             return 0;
+        }
+        for (size_t i = 0; i < obj->metadata->metadata_count; i++) {
+            if (obj->metadata->metadata_keys[i] &&
+                !EVP_DigestUpdate(ctx, obj->metadata->metadata_keys[i],
+                                  strlen(obj->metadata->metadata_keys[i]))) {
+                EVP_MD_CTX_free(ctx);
+                return 0;
+            }
+            if (obj->metadata->metadata_values[i] &&
+                !EVP_DigestUpdate(ctx, obj->metadata->metadata_values[i],
+                                  strlen(obj->metadata->metadata_values[i]))) {
+                EVP_MD_CTX_free(ctx);
+                return 0;
+            }
         }
     }
 
@@ -260,6 +280,10 @@ int compute_data_hash(FILE *file, unsigned char out[32]) {
  *   [char category[category_len]]
  *   [char extension[extension_len]]
  *   [char filename[filename_len]]
+ *   [size_t metadata_count]
+ *   for each KV pair:
+ *     [size_t key_len][char key[key_len]]
+ *     [size_t value_len][char value[value_len]]
  */
 
 int write_object_file(ObjectStore *store, Object *obj) {
@@ -307,6 +331,24 @@ int write_object_file(ObjectStore *store, Object *obj) {
     if (category_len > 0 && fwrite(obj->metadata->category, 1, category_len, f) != category_len) { fclose(f); return 0; }
     if (extension_len > 0 && fwrite(obj->metadata->extension, 1, extension_len, f) != extension_len) { fclose(f); return 0; }
     if (filename_len > 0 && fwrite(obj->metadata->filename, 1, filename_len, f) != filename_len) { fclose(f); return 0; }
+
+    /*  METADATA (KV pairs)  */
+    size_t metadata_count = 0;
+    if (obj->metadata) metadata_count = obj->metadata->metadata_count;
+    if (fwrite(&metadata_count, sizeof(size_t), 1, f) != 1) { fclose(f); return 0; }
+    for (size_t i = 0; i < metadata_count; i++) {
+        const char *k = obj->metadata->metadata_keys ? obj->metadata->metadata_keys[i] : NULL;
+        const char *v = obj->metadata->metadata_values ? obj->metadata->metadata_values[i] : NULL;
+        if (!k || !v) { fclose(f); return 0; }
+        size_t key_len   = strlen(k);
+        size_t value_len = strlen(v);
+        if (fwrite(&key_len, sizeof(size_t), 1, f) != 1 ||
+            fwrite(k, 1, key_len, f) != key_len ||
+            fwrite(&value_len, sizeof(size_t), 1, f) != 1 ||
+            fwrite(v, 1, value_len, f) != value_len) {
+            fclose(f); return 0;
+        }
+    }
 
     fclose(f);
 
@@ -411,6 +453,44 @@ int read_object_file(ObjectStore *store, const unsigned char id[32], Object *out
     metadata->category  = read_string_field(f, category_len);
     metadata->extension = read_string_field(f, extension_len);
     metadata->filename  = read_string_field(f, filename_len);
+
+    /*  METADATA (KV pairs) — optional; gracefully handle old-format files  */
+    size_t metadata_count = 0;
+    if (fread(&metadata_count, sizeof(size_t), 1, f) != 1) {
+        if (feof(f)) {
+            metadata_count = 0; /* EOF: old format with no KV metadata */
+        } else {
+            free_metadata(metadata);
+            fclose(f);
+            return 0;
+        }
+    }
+    if (metadata_count > 0) {
+        metadata->metadata_keys   = calloc(metadata_count, sizeof(char *));
+        metadata->metadata_values = calloc(metadata_count, sizeof(char *));
+        if (!metadata->metadata_keys || !metadata->metadata_values) {
+            free_metadata(metadata); fclose(f); return 0;
+        }
+        metadata->metadata_count = metadata_count;
+        for (size_t i = 0; i < metadata_count; i++) {
+            size_t key_len = 0;
+            if (fread(&key_len, sizeof(size_t), 1, f) != 1) {
+                free_metadata(metadata); fclose(f); return 0;
+            }
+            metadata->metadata_keys[i] = read_string_field(f, key_len);
+            if (!metadata->metadata_keys[i]) {
+                free_metadata(metadata); fclose(f); return 0;
+            }
+            size_t value_len = 0;
+            if (fread(&value_len, sizeof(size_t), 1, f) != 1) {
+                free_metadata(metadata); fclose(f); return 0;
+            }
+            metadata->metadata_values[i] = read_string_field(f, value_len);
+            if (!metadata->metadata_values[i]) {
+                free_metadata(metadata); fclose(f); return 0;
+            }
+        }
+    }
     fclose(f);
 
     /*  READ THE ACTUAL BLOB FROM DEDUPLICATED STORAGE  */

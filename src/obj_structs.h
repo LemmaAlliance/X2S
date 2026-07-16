@@ -28,6 +28,9 @@ typedef struct {
     char *category;
     char *extension;
     char *filename;
+    char **metadata_keys;
+    char **metadata_values;
+    size_t metadata_count;
 } Metadata;
 
 typedef struct {

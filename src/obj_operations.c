@@ -224,6 +224,25 @@ int put_object(ObjectStore *store, User *user, Object *obj) {
             index_obj->metadata->category = obj->metadata->category ? strdup(obj->metadata->category) : NULL;
             index_obj->metadata->extension = obj->metadata->extension ? strdup(obj->metadata->extension) : NULL;
             index_obj->metadata->filename = obj->metadata->filename ? strdup(obj->metadata->filename) : NULL;
+            index_obj->metadata->metadata_count = 0;
+            if (obj->metadata->metadata_count > 0) {
+                index_obj->metadata->metadata_keys   = calloc(obj->metadata->metadata_count, sizeof(char *));
+                index_obj->metadata->metadata_values = calloc(obj->metadata->metadata_count, sizeof(char *));
+                if (index_obj->metadata->metadata_keys && index_obj->metadata->metadata_values) {
+                    for (size_t i = 0; i < obj->metadata->metadata_count; i++) {
+                        index_obj->metadata->metadata_keys[i]   = obj->metadata->metadata_keys[i]
+                            ? strdup(obj->metadata->metadata_keys[i])   : NULL;
+                        index_obj->metadata->metadata_values[i] = obj->metadata->metadata_values[i]
+                            ? strdup(obj->metadata->metadata_values[i]) : NULL;
+                    }
+                    index_obj->metadata->metadata_count = obj->metadata->metadata_count;
+                } else {
+                    free(index_obj->metadata->metadata_keys);
+                    free(index_obj->metadata->metadata_values);
+                    index_obj->metadata->metadata_keys   = NULL;
+                    index_obj->metadata->metadata_values = NULL;
+                }
+            }
         }
     } else {
         index_obj->metadata = NULL;
@@ -484,6 +503,7 @@ int share_object(ObjectStore *store, User *requester, const unsigned char id[32]
 int list_user_objects(ObjectStore *store, User *user, 
                       const char *filter_category, const char *filter_filename,
                       const char *filter_extension,
+                      const char *filter_metadata_key, const char *filter_metadata_value,
                       Object ***out_objects, size_t *out_count) {
     if (!store || !user || !out_objects || !out_count) return 0;
 
@@ -523,6 +543,25 @@ int list_user_objects(ObjectStore *store, User *user,
                                 strcmp(full_obj->metadata->extension, filter_extension) != 0) {
                                 matches = 0;
                             }
+                        }
+
+                        /* Apply optional metadata key=value filter */
+                        if (matches && filter_metadata_key && strlen(filter_metadata_key) > 0) {
+                            int found = 0;
+                            if (full_obj->metadata && full_obj->metadata->metadata_count > 0) {
+                                for (size_t m = 0; m < full_obj->metadata->metadata_count; m++) {
+                                    if (full_obj->metadata->metadata_keys[m] &&
+                                        full_obj->metadata->metadata_values[m] &&
+                                        strcmp(full_obj->metadata->metadata_keys[m], filter_metadata_key) == 0) {
+                                        if (!filter_metadata_value || strlen(filter_metadata_value) == 0 ||
+                                            strcmp(full_obj->metadata->metadata_values[m], filter_metadata_value) == 0) {
+                                            found = 1;
+                                            break;
+                                        }
+                                    }
+                                }
+                            }
+                            if (!found) matches = 0;
                         }
 
                         if (matches) {
