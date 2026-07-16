@@ -211,23 +211,12 @@ int count_data_blob_references(ObjectStore *store, const unsigned char target_da
                     int hret = try_read_header(f, X2S_FILE_TYPE_METADATA, &version);
                     if (hret == -1) { fclose(f); goto next_node; }
 
-                    size_t data_len, cat_len, ext_len, file_len;
-                    if (fread(&data_len, sizeof(size_t), 1, f) == 1 &&
-                        fread(&cat_len, sizeof(size_t), 1, f) == 1 &&
-                        fread(&ext_len, sizeof(size_t), 1, f) == 1 &&
-                        fread(&file_len, sizeof(size_t), 1, f) == 1) {
-                        
-                        fseek(f, 16, SEEK_CUR); // Skip owner uuid
-                        size_t acl_count = 0;
-                        if (fread(&acl_count, sizeof(size_t), 1, f) == 1) {
-                            fseek(f, acl_count * (16 + sizeof(uint32_t)), SEEK_CUR); // Skip ACL entry array
-                            
-                            unsigned char check_hash[32];
-                            if (fread(check_hash, 1, 32, f) == 32) {
-                                if (memcmp(check_hash, target_data_hash, 32) == 0) {
-                                    reference_count++;
-                                }
-                            }
+                    const FormatVtable *fmt = lookup_format(version);
+                    if (fmt && fmt->read_data_hash) {
+                        unsigned char check_hash[32];
+                        if (fmt->read_data_hash(f, check_hash) &&
+                            memcmp(check_hash, target_data_hash, 32) == 0) {
+                            reference_count++;
                         }
                     }
                     fclose(f);

@@ -19,6 +19,8 @@ typedef struct {
 
     int  (*read_users)(FILE *f, UserStore *store);
     int  (*write_users)(FILE *f, UserStore *store);
+
+    int  (*read_data_hash)(FILE *f, unsigned char hash[32]);
 } FormatVtable;
 
 extern const FormatVtable format_registry[];

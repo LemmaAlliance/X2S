@@ -357,20 +357,10 @@ int remove_object(ObjectStore *store, User *user, const unsigned char id[32]) {
                 int hret = try_read_header(f, X2S_FILE_TYPE_METADATA, &version);
                 if (hret == -1) { fclose(f); goto skip_data_blob; }
 
-                size_t d_len, c_len, e_len, f_len;
-                if (fread(&d_len, sizeof(size_t), 1, f) == 1 &&
-                    fread(&c_len, sizeof(size_t), 1, f) == 1 &&
-                    fread(&e_len, sizeof(size_t), 1, f) == 1 &&
-                    fread(&f_len, sizeof(size_t), 1, f) == 1) {
-                    
-                    fseek(f, 16, SEEK_CUR); // Skip owner
-                    size_t acl_count = 0;
-                    if (fread(&acl_count, sizeof(size_t), 1, f) == 1) {
-                        fseek(f, acl_count * (16 + sizeof(uint32_t)), SEEK_CUR); // Skip ACLs
-                        if (fread(data_hash, 1, 32, f) == 32) {
-                            hash_read_success = 1;
-                        }
-                    }
+                const FormatVtable *fmt = lookup_format(version);
+                if (fmt && fmt->read_data_hash &&
+                    fmt->read_data_hash(f, data_hash)) {
+                    hash_read_success = 1;
                 }
                 fclose(f);
             }

@@ -209,17 +209,38 @@ static int write_users_body(FILE *f, UserStore *store) {
     return 1;
 }
 
+/* ========== Data hash reader (lightweight, avoids full metadata parse) ========== */
+
+static int read_data_hash_body(FILE *f, unsigned char hash[32]) {
+    size_t data_len, cat_len, ext_len, file_len;
+    if (fread(&data_len, sizeof(size_t), 1, f) != 1) return 0;
+    if (fread(&cat_len, sizeof(size_t), 1, f) != 1) return 0;
+    if (fread(&ext_len, sizeof(size_t), 1, f) != 1) return 0;
+    if (fread(&file_len, sizeof(size_t), 1, f) != 1) return 0;
+
+    if (fseek(f, 16, SEEK_CUR) != 0) return 0;
+
+    size_t acl_count = 0;
+    if (fread(&acl_count, sizeof(size_t), 1, f) != 1) return 0;
+
+    if (fseek(f, (off_t)acl_count * (16 + sizeof(uint32_t)), SEEK_CUR) != 0) return 0;
+
+    return fread(hash, 1, 32, f) == 32;
+}
+
 /* ========== Registry ========== */
 
 const FormatVtable format_registry[] = {
     {0, "legacy",
         read_metadata_body, NULL,
         read_index_body,    NULL,
-        read_users_body,    NULL},
+        read_users_body,    NULL,
+        read_data_hash_body},
     {1, "v1",
         read_metadata_body, write_metadata_body,
         read_index_body,    write_index_body,
-        read_users_body,    write_users_body},
+        read_users_body,    write_users_body,
+        read_data_hash_body},
 };
 
 const size_t format_registry_count = sizeof(format_registry) / sizeof(format_registry[0]);
