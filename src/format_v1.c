@@ -7,6 +7,7 @@
 
 static int read_metadata_body(FILE *f, Object *out) {
     size_t data_len, category_len, extension_len, filename_len;
+    Metadata *metadata = NULL;
 
     if (fread(&data_len, sizeof(size_t), 1, f) != 1 ||
         fread(&category_len, sizeof(size_t), 1, f) != 1 ||
@@ -22,27 +23,21 @@ static int read_metadata_body(FILE *f, Object *out) {
     if (!out->acl) return 0;
     if (acl_count > 0) {
         out->acl->entries = calloc(acl_count, sizeof(ACLEntry));
-        if (!out->acl->entries) { free(out->acl); return 0; }
+        if (!out->acl->entries) goto cleanup;
         out->acl->count = acl_count;
         for (size_t i = 0; i < acl_count; i++) {
             ACLEntry *e = &out->acl->entries[i];
             if (fread(e->user_id, 1, 16, f) != 16 ||
-                fread(&e->permissions, sizeof(uint32_t), 1, f) != 1) {
-                free(out->acl->entries); free(out->acl); return 0;
-            }
+                fread(&e->permissions, sizeof(uint32_t), 1, f) != 1)
+                goto cleanup;
         }
     }
 
-    if (fread(out->data_hash, 1, 32, f) != 32) {
-        if (out->acl->entries) free(out->acl->entries);
-        free(out->acl); return 0;
-    }
+    if (fread(out->data_hash, 1, 32, f) != 32)
+        goto cleanup;
 
-    Metadata *metadata = calloc(1, sizeof(Metadata));
-    if (!metadata) {
-        if (out->acl->entries) free(out->acl->entries);
-        free(out->acl); return 0;
-    }
+    metadata = calloc(1, sizeof(Metadata));
+    if (!metadata) goto cleanup;
     metadata->category  = read_string_field(f, category_len);
     metadata->extension = read_string_field(f, extension_len);
     metadata->filename  = read_string_field(f, filename_len);
@@ -52,52 +47,43 @@ static int read_metadata_body(FILE *f, Object *out) {
         if (feof(f)) {
             metadata_count = 0;
         } else {
-            free_metadata(metadata);
-            if (out->acl->entries) free(out->acl->entries);
-            free(out->acl); return 0;
+            goto cleanup;
         }
     }
 
     if (metadata_count > 0) {
         metadata->metadata_keys   = calloc(metadata_count, sizeof(char *));
         metadata->metadata_values = calloc(metadata_count, sizeof(char *));
-        if (!metadata->metadata_keys || !metadata->metadata_values) {
-            free_metadata(metadata);
-            if (out->acl->entries) free(out->acl->entries);
-            free(out->acl); return 0;
-        }
+        if (!metadata->metadata_keys || !metadata->metadata_values)
+            goto cleanup;
         metadata->metadata_count = metadata_count;
         for (size_t i = 0; i < metadata_count; i++) {
             size_t key_len = 0;
-            if (fread(&key_len, sizeof(size_t), 1, f) != 1) {
-                free_metadata(metadata);
-                if (out->acl->entries) free(out->acl->entries);
-                free(out->acl); return 0;
-            }
+            if (fread(&key_len, sizeof(size_t), 1, f) != 1)
+                goto cleanup;
             metadata->metadata_keys[i] = read_string_field(f, key_len);
-            if (!metadata->metadata_keys[i]) {
-                free_metadata(metadata);
-                if (out->acl->entries) free(out->acl->entries);
-                free(out->acl); return 0;
-            }
+            if (!metadata->metadata_keys[i])
+                goto cleanup;
             size_t value_len = 0;
-            if (fread(&value_len, sizeof(size_t), 1, f) != 1) {
-                free_metadata(metadata);
-                if (out->acl->entries) free(out->acl->entries);
-                free(out->acl); return 0;
-            }
+            if (fread(&value_len, sizeof(size_t), 1, f) != 1)
+                goto cleanup;
             metadata->metadata_values[i] = read_string_field(f, value_len);
-            if (!metadata->metadata_values[i]) {
-                free_metadata(metadata);
-                if (out->acl->entries) free(out->acl->entries);
-                free(out->acl); return 0;
-            }
+            if (!metadata->metadata_values[i])
+                goto cleanup;
         }
     }
 
     out->metadata = metadata;
     out->size = data_len;
     return 1;
+
+cleanup:
+    free_metadata(metadata);
+    if (out->acl) {
+        free(out->acl->entries);
+        free(out->acl);
+    }
+    return 0;
 }
 
 static int write_metadata_body(FILE *f, Object *obj) {
