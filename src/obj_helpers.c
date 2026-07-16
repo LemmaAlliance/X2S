@@ -337,12 +337,15 @@ int write_object_file(ObjectStore *store, Object *obj) {
     if (obj->metadata) metadata_count = obj->metadata->metadata_count;
     if (fwrite(&metadata_count, sizeof(size_t), 1, f) != 1) { fclose(f); return 0; }
     for (size_t i = 0; i < metadata_count; i++) {
-        size_t key_len   = strlen(obj->metadata->metadata_keys[i]);
-        size_t value_len = strlen(obj->metadata->metadata_values[i]);
+        const char *k = obj->metadata->metadata_keys ? obj->metadata->metadata_keys[i] : NULL;
+        const char *v = obj->metadata->metadata_values ? obj->metadata->metadata_values[i] : NULL;
+        if (!k || !v) { fclose(f); return 0; }
+        size_t key_len   = strlen(k);
+        size_t value_len = strlen(v);
         if (fwrite(&key_len, sizeof(size_t), 1, f) != 1 ||
-            fwrite(obj->metadata->metadata_keys[i], 1, key_len, f) != key_len ||
+            fwrite(k, 1, key_len, f) != key_len ||
             fwrite(&value_len, sizeof(size_t), 1, f) != 1 ||
-            fwrite(obj->metadata->metadata_values[i], 1, value_len, f) != value_len) {
+            fwrite(v, 1, value_len, f) != value_len) {
             fclose(f); return 0;
         }
     }
