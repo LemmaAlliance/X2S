@@ -15,7 +15,7 @@
  * ---------------------------------------------------------------------- */
 
 #define CORS_METHODS "GET, POST, DELETE, OPTIONS"
-#define CORS_HEADERS "Authorization, Content-Type, X-Filename, X-Category, X-Extension"
+#define CORS_HEADERS "Authorization, Content-Type, X-Filename, X-Category, X-Extension, X-Metadata-*"
 
 /*
  * Attach CORS headers dynamically based on the configured server origin.
@@ -55,6 +55,42 @@ static enum MHD_Result send_error_cors(struct MHD_Connection *conn, const char *
 /* -------------------------------------------------------------------------
  * Route handlers
  * ---------------------------------------------------------------------- */
+
+#define X_METADATA_PREFIX "X-Metadata-"
+#define X_METADATA_PREFIX_LEN 11 /* strlen("X-Metadata-") */
+
+/* Callback context for collecting X-Metadata-* headers */
+typedef struct {
+  char **keys;
+  char **values;
+  size_t idx;
+} MetadataCollectCtx;
+
+static void free_metadata_kv(char **keys, char **values, size_t count) {
+  for (size_t i = 0; i < count; i++) { free(keys[i]); free(values[i]); }
+  free(keys); free(values);
+}
+
+static enum MHD_Result count_metadata_headers(void *cls, enum MHD_ValueKind kind,
+                                              const char *key, const char *value) {
+  (void)kind; (void)value;
+  if (strncasecmp(key, X_METADATA_PREFIX, X_METADATA_PREFIX_LEN) == 0)
+    (*(size_t *)cls)++;
+  return MHD_YES;
+}
+
+static enum MHD_Result collect_metadata_headers(void *cls, enum MHD_ValueKind kind,
+                                                const char *key, const char *value) {
+  (void)kind;
+  if (strncasecmp(key, X_METADATA_PREFIX, X_METADATA_PREFIX_LEN) != 0)
+    return MHD_YES;
+  MetadataCollectCtx *ctx = cls;
+  ctx->keys[ctx->idx] = strdup(key + X_METADATA_PREFIX_LEN);
+  ctx->values[ctx->idx] = strdup(value ? value : "");
+  ctx->idx++;
+  return MHD_YES;
+}
+
 /*
  * PUT /objects
  *
@@ -131,16 +167,40 @@ static enum MHD_Result handle_put(struct MHD_Connection *conn,
   const char *extension = MHD_lookup_connection_value(conn, MHD_HEADER_KIND, "X-Extension");
   const char *filename = MHD_lookup_connection_value(conn, MHD_HEADER_KIND, "X-Filename");
 
+  /* Collect X-Metadata-* headers */
+  size_t meta_kv_count = 0;
+  MHD_get_connection_values(conn, MHD_HEADER_KIND, count_metadata_headers, &meta_kv_count);
+
+  char **meta_kv_keys = NULL;
+  char **meta_kv_values = NULL;
+  if (meta_kv_count > 0) {
+    meta_kv_keys   = malloc(meta_kv_count * sizeof(char *));
+    meta_kv_values = malloc(meta_kv_count * sizeof(char *));
+    if (meta_kv_keys && meta_kv_values) {
+      MetadataCollectCtx collect_ctx = {.keys = meta_kv_keys, .values = meta_kv_values, .idx = 0};
+      MHD_get_connection_values(conn, MHD_HEADER_KIND, collect_metadata_headers, &collect_ctx);
+    } else {
+      free(meta_kv_keys);
+      free(meta_kv_values);
+      meta_kv_keys = NULL;
+      meta_kv_values = NULL;
+      meta_kv_count = 0;
+    }
+  }
+
   Metadata meta = {
       .category = (char *)category,
       .extension = (char *)extension,
       .filename = (char *)filename,
+      .metadata_keys = meta_kv_keys,
+      .metadata_values = meta_kv_values,
+      .metadata_count = meta_kv_count,
   };
 
   Object obj = {0};
   obj.data = ub->fp;
   obj.size = ub->len;
-  obj.metadata = (category || extension || filename) ? &meta : NULL;
+  obj.metadata = (category || extension || filename || meta_kv_count > 0) ? &meta : NULL;
 
   User user;
   get_user_from_request(conn, &user, server->tokens);
@@ -148,9 +208,12 @@ static enum MHD_Result handle_put(struct MHD_Connection *conn,
   if (!put_object(server->store, &user, &obj)) {
     fclose(ub->fp);
     ub->fp = NULL;
+    free_metadata_kv(meta_kv_keys, meta_kv_values, meta_kv_count);
     return send_error_cors(conn, server->cors_origin, MHD_HTTP_INTERNAL_SERVER_ERROR,
                       "failed to store object");
   }
+
+  free_metadata_kv(meta_kv_keys, meta_kv_values, meta_kv_count);
 
   /* Close temporary file after successful storage */
   fclose(ub->fp);
@@ -260,107 +323,143 @@ static enum MHD_Result handle_delete(struct MHD_Connection *conn,
 }
 
 static enum MHD_Result handle_list_objects(struct MHD_Connection *conn, ApiServer *server) {
-    User user;
-    get_user_from_request(conn, &user, server->tokens);
+  User user;
+  get_user_from_request(conn, &user, server->tokens);
 
-    const char *category = MHD_lookup_connection_value(conn, MHD_GET_ARGUMENT_KIND, "category");
-    const char *filename = MHD_lookup_connection_value(conn, MHD_GET_ARGUMENT_KIND, "filename");
-    const char *extension = MHD_lookup_connection_value(conn, MHD_GET_ARGUMENT_KIND, "extension");
+  const char *category = MHD_lookup_connection_value(conn, MHD_GET_ARGUMENT_KIND, "category");
+  const char *filename = MHD_lookup_connection_value(conn, MHD_GET_ARGUMENT_KIND, "filename");
+  const char *extension = MHD_lookup_connection_value(conn, MHD_GET_ARGUMENT_KIND, "extension");
+  const char *metadata_key = MHD_lookup_connection_value(conn, MHD_GET_ARGUMENT_KIND, "metadata_key");
+  const char *metadata_value = MHD_lookup_connection_value(conn, MHD_GET_ARGUMENT_KIND, "metadata_value");
 
-    Object **objects = NULL;
-    size_t count = 0;
+  Object **objects = NULL;
+  size_t count = 0;
 
-    if (!list_user_objects(server->store, &user, category, filename, extension, &objects, &count)) {
-        return send_error_cors(conn, server->cors_origin, MHD_HTTP_INTERNAL_SERVER_ERROR, "failed to read index files");
-    }
+  if (!list_user_objects(server->store, &user, category, filename, extension, metadata_key, metadata_value, &objects, &count)) {
+      return send_error_cors(conn, server->cors_origin, MHD_HTTP_INTERNAL_SERVER_ERROR, "failed to read index files");
+  }
 
-    size_t json_cap = 1024;
-    char *json = malloc(json_cap);
-    if (!json) {
-        for (size_t i = 0; i < count; i++) {
-            free(objects[i]->data);
-            if (objects[i]->acl) { free(objects[i]->acl->entries); free(objects[i]->acl); }
-            free_metadata(objects[i]->metadata);
-            free(objects[i]);
-        }
-        free(objects);
-        return MHD_NO;
-    }
+  size_t json_cap = 1024;
+  char *json = malloc(json_cap);
+  if (!json) {
+      for (size_t i = 0; i < count; i++) {
+          free(objects[i]->data);
+          if (objects[i]->acl) { free(objects[i]->acl->entries); free(objects[i]->acl); }
+          free_metadata(objects[i]->metadata);
+          free(objects[i]);
+      }
+      free(objects);
+      return MHD_NO;
+  }
 
-    strcpy(json, "{\"objects\":[");
-    size_t json_len = strlen(json);
+  strcpy(json, "{\"objects\":[");
+  size_t json_len = strlen(json);
 
-    for (size_t i = 0; i < count; i++) {
-        char hex_id[65] = {0};
-        for (int j = 0; j < 32; j++) {
-            snprintf(hex_id + j * 2, 3, "%02x", objects[i]->id[j]);
-        }
+  for (size_t i = 0; i < count; i++) {
+      char hex_id[65] = {0};
+      for (int j = 0; j < 32; j++) {
+          snprintf(hex_id + j * 2, 3, "%02x", objects[i]->id[j]);
+      }
 
-        const char *obj_cat = (objects[i]->metadata && objects[i]->metadata->category) ? objects[i]->metadata->category : "";
-        const char *obj_fn = (objects[i]->metadata && objects[i]->metadata->filename) ? objects[i]->metadata->filename : "";
-        const char *obj_ext = (objects[i]->metadata && objects[i]->metadata->extension) ? objects[i]->metadata->extension : "";
+      const char *obj_cat = (objects[i]->metadata && objects[i]->metadata->category) ? objects[i]->metadata->category : "";
+      const char *obj_fn = (objects[i]->metadata && objects[i]->metadata->filename) ? objects[i]->metadata->filename : "";
+      const char *obj_ext = (objects[i]->metadata && objects[i]->metadata->extension) ? objects[i]->metadata->extension : "";
 
-        size_t needed = strlen(hex_id) + strlen(obj_cat) + strlen(obj_fn) + strlen(obj_ext) + 160;
+      /* Build metadata JSON fragment: "key":"value","key2":"value2" */
+      char *meta_json = NULL;
+      size_t meta_json_len = 0;
+      if (objects[i]->metadata && objects[i]->metadata->metadata_count > 0) {
+          size_t meta_json_cap = 256;
+          for (size_t m = 0; m < objects[i]->metadata->metadata_count; m++) {
+              if (objects[i]->metadata->metadata_keys[m])
+                  meta_json_cap += 6 * strlen(objects[i]->metadata->metadata_keys[m]) + 8;
+              if (objects[i]->metadata->metadata_values[m])
+                  meta_json_cap += 6 * strlen(objects[i]->metadata->metadata_values[m]) + 8;
+          }
+          meta_json = malloc(meta_json_cap);
+          if (meta_json) {
+              size_t pos = 0;
+              pos += snprintf(meta_json + pos, meta_json_cap - pos, "{");
+              for (size_t m = 0; m < objects[i]->metadata->metadata_count; m++) {
+                  if (!objects[i]->metadata->metadata_keys[m]) continue;
+                  char *ek = json_escape(objects[i]->metadata->metadata_keys[m]);
+                  char *ev = json_escape(objects[i]->metadata->metadata_values[m]);
+                  int n = snprintf(meta_json + pos, meta_json_cap - pos,
+                      "%s\"%s\":\"%s\"", (pos > 1) ? "," : "",
+                      ek ? ek : "", ev ? ev : "");
+                  if (n > 0) pos += (size_t)n;
+                  free(ek); free(ev);
+              }
+              snprintf(meta_json + pos, meta_json_cap - pos, "}");
+              meta_json_len = strlen(meta_json);
+          }
+      }
 
-        if (json_len + needed >= json_cap) {
-            json_cap *= 2;
-            char *tmp = realloc(json, json_cap);
-            if (!tmp) {
-                for (size_t k = 0; k < count; k++) {
-                    free(objects[k]->data);
-                    if (objects[k]->acl) { free(objects[k]->acl->entries); free(objects[k]->acl); }
-                    free_metadata(objects[k]->metadata);
-                    free(objects[k]);
-                }
-                free(objects);
-                free(json);
-                return MHD_NO;
-            }
-            json = tmp;
-        }
+      size_t needed = strlen(hex_id) + strlen(obj_cat) + strlen(obj_fn) + strlen(obj_ext) + meta_json_len + 200; /* +200: JSON object format string overhead */
 
-        if (json_len >= json_cap) {
-          break;
-        }
-        size_t remaining = json_cap - json_len;
+      if (json_len + needed >= json_cap) {
+          json_cap *= 2;
+          char *tmp = realloc(json, json_cap);
+          if (!tmp) {
+              for (size_t k = 0; k < count; k++) {
+                  free(objects[k]->data);
+                  if (objects[k]->acl) { free(objects[k]->acl->entries); free(objects[k]->acl); }
+                  free_metadata(objects[k]->metadata);
+                  free(objects[k]);
+              }
+              free(objects);
+              free(json);
+              free(meta_json);
+              return MHD_NO;
+          }
+          json = tmp;
+      }
 
-        int res = snprintf(json + json_len, remaining, 
-                   "%s{\"id\":\"%s\",\"category\":\"%s\",\"filename\":\"%s\",\"extension\":\"%s\",\"size\":%zu}", 
-                   (i > 0) ? "," : "", hex_id, obj_cat, obj_fn, obj_ext, objects[i]->size);
-        
-        if (res > 0) {
-          break;
-        }
+      if (json_len >= json_cap) {
+        free(meta_json);
+        break;
+      }
+      size_t remaining = json_cap - json_len;
 
-        if ((size_t)res >= remaining) {
-          break;
-        }
+      int res = snprintf(json + json_len, remaining, 
+                 "%s{\"id\":\"%s\",\"category\":\"%s\",\"filename\":\"%s\",\"extension\":\"%s\",\"size\":%zu,\"metadata\":%s}", 
+                 (i > 0) ? "," : "", hex_id, obj_cat, obj_fn, obj_ext, objects[i]->size,
+                 meta_json ? meta_json : "{}");
+      
+      free(meta_json);
+      if (res < 0) {
+        break;
+      }
 
-        json_len += (size_t)res;
-    }
+      if ((size_t)res >= remaining) {
+        break;
+      }
 
-    strcat(json, "]}");
-    json_len = strlen(json);
+      json_len += (size_t)res;
+  }
 
-    for (size_t i = 0; i < count; i++) {
-        free(objects[i]->data);
-        if (objects[i]->acl) { free(objects[i]->acl->entries); free(objects[i]->acl); }
-        free_metadata(objects[i]->metadata);
-        free(objects[i]);
-    }
-    free(objects);
+  strcat(json, "]}");
+  json_len = strlen(json);
 
-    struct MHD_Response *resp = MHD_create_response_from_buffer(json_len, json, MHD_RESPMEM_MUST_FREE);
-    if (!resp) {
-        free(json);
-        return MHD_NO;
-    }
+  for (size_t i = 0; i < count; i++) {
+      free(objects[i]->data);
+      if (objects[i]->acl) { free(objects[i]->acl->entries); free(objects[i]->acl); }
+      free_metadata(objects[i]->metadata);
+      free(objects[i]);
+  }
+  free(objects);
 
-    MHD_add_response_header(resp, "Content-Type", "application/json");
-    add_cors_headers(resp, server->cors_origin);
-    enum MHD_Result ret = MHD_queue_response(conn, MHD_HTTP_OK, resp);
-    MHD_destroy_response(resp);
-    return ret;
+  struct MHD_Response *resp = MHD_create_response_from_buffer(json_len, json, MHD_RESPMEM_MUST_FREE);
+  if (!resp) {
+      free(json);
+      return MHD_NO;
+  }
+
+  MHD_add_response_header(resp, "Content-Type", "application/json");
+  add_cors_headers(resp, server->cors_origin);
+  enum MHD_Result ret = MHD_queue_response(conn, MHD_HTTP_OK, resp);
+  MHD_destroy_response(resp);
+  return ret;
 }
 
 /* -------------------------------------------------------------------------

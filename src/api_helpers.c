@@ -80,6 +80,36 @@ enum MHD_Result send_error(struct MHD_Connection *conn,
 }
 
 /* -------------------------------------------------------------------------
+ * JSON escaping
+ * ---------------------------------------------------------------------- */
+
+char *json_escape(const char *s) {
+  if (!s) return NULL;
+  size_t len = strlen(s);
+  char *out = malloc(6 * len + 1);
+  if (!out) return NULL;
+  size_t j = 0;
+  for (size_t i = 0; i < len; i++) {
+    unsigned char c = s[i];
+    switch (c) {
+    case '"':  out[j++] = '\\'; out[j++] = '"';  break;
+    case '\\': out[j++] = '\\'; out[j++] = '\\'; break;
+    case '\n': out[j++] = '\\'; out[j++] = 'n';  break;
+    case '\t': out[j++] = '\\'; out[j++] = 't';  break;
+    case '\r': out[j++] = '\\'; out[j++] = 'r';  break;
+    default:
+      if (c < 0x20) {
+        j += snprintf(out + j, 7, "\\u%04x", c);
+      } else {
+        out[j++] = c;
+      }
+    }
+  }
+  out[j] = '\0';
+  return out;
+}
+
+/* -------------------------------------------------------------------------
  * Hex parsing
  * ---------------------------------------------------------------------- */
 

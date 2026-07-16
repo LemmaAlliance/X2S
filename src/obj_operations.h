@@ -17,6 +17,7 @@ int share_object(ObjectStore *store, User *requester, const unsigned char id[32]
 int list_user_objects(ObjectStore *store, User *user, 
                       const char *filter_category, const char *filter_filename,
                       const char *filter_extension,
+                      const char *filter_metadata_key, const char *filter_metadata_value,
                       Object ***out_objects, size_t *out_count);
 
 #endif
