@@ -1,9 +1,11 @@
 #define _POSIX_C_SOURCE 200809L /* for strcasecmp */
 #include "api_server.h"
-#include "auth.h"
-#include "obj_operations.h"
-#include "obj_structs.h"
-#include "api_helpers.h"
+#include "auth/auth.h"
+#include "storage/object_repository.h"
+#include "core/object_types.h"
+#include "server/mime_types.h"
+#include "server/http_utils.h"
+#include "storage/object_io.h"
 #include <microhttpd.h>
 #include <stdio.h>
 #include <stdlib.h>

@@ -1,7 +1,8 @@
 #include <string.h>
-#include "format.h"
-#include "format_registry.h"
-#include "obj_helpers.h"
+#include "core/format.h"
+#include "core/format_registry.h"
+#include "storage/object_serialization.h"
+#include "storage/object_io.h"
 
 /* ========== Metadata body (shared by v0 + v1) ========== */
 

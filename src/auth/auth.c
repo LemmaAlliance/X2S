@@ -5,9 +5,9 @@
 #include <openssl/rand.h>
 #include <openssl/crypto.h>
 #include <time.h>
-#include "auth.h"
-#include "format.h"
-#include "format_registry.h"
+#include "auth/auth.h"
+#include "core/format.h"
+#include "core/format_registry.h"
 
 #define PBKDF2_ITERATIONS 400000
 #define PATH_MAX_LEN 4096

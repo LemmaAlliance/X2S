@@ -4,9 +4,10 @@
 #include <stdlib.h>
 #include <string.h>
 #include <sys/stat.h>
-#include "format.h"
-#include "format_registry.h"
-#include "obj_helpers.h"
+#include "core/format.h"
+#include "core/format_registry.h"
+#include "storage/object_serialization.h"
+#include "storage/object_io.h"
 
 /* ========== Generic migration engine ========== */
 

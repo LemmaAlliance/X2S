@@ -1,7 +1,7 @@
-#include "api_server.h"
-#include "auth.h"
-#include "cli_setup.h"
-#include "obj_operations.h"
+#include "server/api_server.h"
+#include "auth/auth.h"
+#include "config/config_parser.h"
+#include "storage/object_repository.h"
 #include <errno.h>
 #include <signal.h>
 #include <stdio.h>

@@ -4,8 +4,8 @@
 #include <stdio.h>
 #include <stdint.h>
 #include <stdlib.h>
-#include "obj_structs.h"
-#include "auth.h"
+#include "core/object_types.h"
+#include "auth/auth.h"
 
 typedef struct {
     uint8_t version;

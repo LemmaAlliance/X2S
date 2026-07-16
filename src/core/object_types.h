@@ -1,12 +1,12 @@
-#ifndef OBJ_STRUCTS_H
-#define OBJ_STRUCTS_H
+#ifndef OBJECT_TYPES_H
+#define OBJECT_TYPES_H
 
 #include <stdlib.h>
 #include <stdint.h>
 #include <stdio.h>
 
-#define PERM_READ  1
-#define PERM_WRITE 2
+#define PERM_READ   1
+#define PERM_WRITE  2
 #define PERM_DELETE 4
 
 typedef struct {
@@ -34,16 +34,15 @@ typedef struct {
 } Metadata;
 
 typedef struct {
-    unsigned char id[32]; // SHA-256
-    size_t size; // byte length of data
-    Metadata *metadata; // populated on get_object, NULL otherwise
-    FILE *data; // populated on get_object, NULL otherwise
+    unsigned char id[32];
+    size_t size;
+    Metadata *metadata;
+    FILE *data;
     ACL *acl;
     unsigned char owner[16];
-    unsigned char data_hash[32]; // SHA-256 of data blob (stored in metadata file)
+    unsigned char data_hash[32];
 } Object;
 
-/* Linked list node for hash buckets */
 typedef struct ObjectNode {
     Object *obj;
     struct ObjectNode *next;
@@ -53,7 +52,7 @@ typedef struct {
     ObjectNode **buckets;
     size_t capacity;
     size_t count;
-    char store_path[4096]; // directory where object files are written (PATH_MAX)
+    char store_path[4096];
 } ObjectStore;
 
 #endif

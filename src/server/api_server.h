@@ -1,8 +1,8 @@
 #ifndef API_SERVER_H
 #define API_SERVER_H
 
-#include "obj_structs.h"
-#include "auth.h"
+#include "core/object_types.h"
+#include "auth/auth.h"
 
 /*
  * api_server.h — HTTP REST layer for X2S

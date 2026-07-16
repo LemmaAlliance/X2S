@@ -51,14 +51,19 @@ find_package(PkgConfig REQUIRED)
 pkg_check_modules(MHD REQUIRED libmicrohttpd)
 
 add_executable(x2s
-    src/main.c
-    src/obj_operations.c
-    src/api_server.c
-    src/auth.c
-    src/obj_helpers.c
-    src/api_helpers.c
-    src/cli_setup.c
-    src/format_v1.c
+    src/cli/main.c
+    src/server/api_server.c
+    src/auth/auth.c
+    src/config/cli_setup.c
+    src/format/format_v1.c
+    src/storage/object_repository.c
+    src/storage/object_permissions.c
+    src/storage/object_index.c
+    src/storage/object_io.c
+    src/crypto/object_crypto.c
+    src/storage/object_serialization.c
+    src/server/http_utils.c
+    src/server/mime_types.c
     ${_cjson_c}
 )
 
@@ -74,10 +79,12 @@ target_link_libraries(x2s PRIVATE
 )
 
 add_executable(x2s-migrate
-    src/migrate.c
-    src/obj_helpers.c
-    src/auth.c
-    src/format_v1.c
+    src/cli/migrate.c
+    src/auth/auth.c
+    src/format/format_v1.c
+    src/storage/object_io.c
+    src/crypto/object_crypto.c
+    src/storage/object_serialization.c
     ${_cjson_c}
 )
 
