@@ -5,6 +5,8 @@
 #include <sys/stat.h>
 #include <openssl/evp.h>
 #include "obj_structs.h"
+#include "format.h"
+#include "format_registry.h"
 
 #define PATH_MAX_LEN 4096
 
@@ -205,8 +207,11 @@ int count_data_blob_references(ObjectStore *store, const unsigned char target_da
                 object_path(store, node->obj->id, path, sizeof(path));
                 FILE *f = fopen(path, "rb");
                 if (f) {
+                    uint8_t version = 0;
+                    int hret = try_read_header(f, X2S_FILE_TYPE_METADATA, &version);
+                    if (hret == -1) { fclose(f); goto next_node; }
+
                     size_t data_len, cat_len, ext_len, file_len;
-                    /* Skip lengths and security headers to find the hash */
                     if (fread(&data_len, sizeof(size_t), 1, f) == 1 &&
                         fread(&cat_len, sizeof(size_t), 1, f) == 1 &&
                         fread(&ext_len, sizeof(size_t), 1, f) == 1 &&
@@ -228,6 +233,7 @@ int count_data_blob_references(ObjectStore *store, const unsigned char target_da
                     fclose(f);
                 }
             }
+next_node:
             node = node->next;
         }
     }
@@ -290,64 +296,20 @@ int write_object_file(ObjectStore *store, Object *obj) {
     char path[PATH_MAX_LEN + 128];
     object_path(store, obj->id, path, sizeof(path));
 
+    const FormatVtable *fmt = latest_format();
+    if (!fmt || !fmt->write_metadata) return 0;
+
+    if (!compute_data_hash(obj->data, obj->data_hash)) return 0;
+
     FILE *f = fopen(path, "wb");
     if (!f) return 0;
 
-    size_t category_len  = (obj->metadata && obj->metadata->category) ? strlen(obj->metadata->category)  : 0;
-    size_t extension_len = (obj->metadata && obj->metadata->extension) ? strlen(obj->metadata->extension) : 0;
-    size_t filename_len  = (obj->metadata && obj->metadata->filename) ? strlen(obj->metadata->filename)  : 0;
-
-    /*  basic lengths  */
-    if (fwrite(&obj->size, sizeof(size_t), 1, f) != 1 ||
-        fwrite(&category_len, sizeof(size_t), 1, f) != 1 ||
-        fwrite(&extension_len, sizeof(size_t), 1, f) != 1 ||
-        fwrite(&filename_len, sizeof(size_t), 1, f) != 1) {
-        fclose(f);
-        return 0;
+    if (!try_write_header(f, X2S_FILE_TYPE_METADATA)) {
+        fclose(f); return 0;
     }
 
-    /*  OWNER  */
-    if (fwrite(obj->owner, 1, 16, f) != 16) { fclose(f); return 0; }
-
-    /*  ACL  */
-    size_t acl_count = (obj->acl) ? obj->acl->count : 0;
-    if (fwrite(&acl_count, sizeof(size_t), 1, f) != 1) { fclose(f); return 0; }
-    if (obj->acl && acl_count > 0) {
-        for (size_t i = 0; i < acl_count; i++) {
-            ACLEntry *e = &obj->acl->entries[i];
-            if (fwrite(e->user_id, 1, 16, f) != 16 || fwrite(&e->permissions, sizeof(uint32_t), 1, f) != 1) {
-                fclose(f); return 0;
-            }
-        }
-    }
-
-    /*  WRITE DATA REFERENCE  */
-    unsigned char data_hash[32];
-    // TODO: Data hash is possibly redundant when we have more than one reference?
-    if (!compute_data_hash(obj->data, data_hash)) { fclose(f); return 0; }
-    if (fwrite(data_hash, 1, 32, f) != 32) { fclose(f); return 0; }
-
-    /*  METADATA (Strings)  */
-    if (category_len > 0 && fwrite(obj->metadata->category, 1, category_len, f) != category_len) { fclose(f); return 0; }
-    if (extension_len > 0 && fwrite(obj->metadata->extension, 1, extension_len, f) != extension_len) { fclose(f); return 0; }
-    if (filename_len > 0 && fwrite(obj->metadata->filename, 1, filename_len, f) != filename_len) { fclose(f); return 0; }
-
-    /*  METADATA (KV pairs)  */
-    size_t metadata_count = 0;
-    if (obj->metadata) metadata_count = obj->metadata->metadata_count;
-    if (fwrite(&metadata_count, sizeof(size_t), 1, f) != 1) { fclose(f); return 0; }
-    for (size_t i = 0; i < metadata_count; i++) {
-        const char *k = obj->metadata->metadata_keys ? obj->metadata->metadata_keys[i] : NULL;
-        const char *v = obj->metadata->metadata_values ? obj->metadata->metadata_values[i] : NULL;
-        if (!k || !v) { fclose(f); return 0; }
-        size_t key_len   = strlen(k);
-        size_t value_len = strlen(v);
-        if (fwrite(&key_len, sizeof(size_t), 1, f) != 1 ||
-            fwrite(k, 1, key_len, f) != key_len ||
-            fwrite(&value_len, sizeof(size_t), 1, f) != 1 ||
-            fwrite(v, 1, value_len, f) != value_len) {
-            fclose(f); return 0;
-        }
+    if (!fmt->write_metadata(f, obj)) {
+        fclose(f); return 0;
     }
 
     fclose(f);
@@ -355,29 +317,25 @@ int write_object_file(ObjectStore *store, Object *obj) {
     /*  WRITE SHARED DATA BLOB ONLY IF IT DOES NOT EXIST  */
     char data_path[PATH_MAX_LEN + 128];
     char data_hex[65];
-    id_to_hex(data_hash, data_hex);
+    id_to_hex(obj->data_hash, data_hex);
     snprintf(data_path, sizeof(data_path), "%s/data_%s", store->store_path, data_hex);
 
     FILE *df = fopen(data_path, "rb");
     if (df) {
-        fclose(df); // Content already exists on disk! Storage saved.
+        fclose(df);
     } else {
         df = fopen(data_path, "wb");
         if (df) {
             if (obj->size > 0 && obj->data) {
                 fseek(obj->data, 0, SEEK_SET);
-
                 char buffer[4096];
                 size_t bytes_to_read = obj->size;
-                size_t bytes_read;
-
-                /* Basically we iterate in chunks of 4096 over file */
-                while (bytes_to_read > 0 &&
-                        (bytes_read = fread(buffer, 1, 
-                        (bytes_to_read < sizeof(buffer)) ? 
-                        bytes_to_read : sizeof(buffer), obj->data)) > 0) {
-                    fwrite(buffer, 1, bytes_read, df);
-                    bytes_to_read -= bytes_read;
+                while (bytes_to_read > 0) {
+                    size_t chunk = (bytes_to_read < sizeof(buffer)) ? bytes_to_read : sizeof(buffer);
+                    size_t n = fread(buffer, 1, chunk, obj->data);
+                    if (n == 0) break;
+                    fwrite(buffer, 1, n, df);
+                    bytes_to_read -= n;
                 }
             }
             fclose(df);
@@ -411,125 +369,45 @@ int read_object_file(ObjectStore *store, const unsigned char id[32], Object *out
     FILE *f = fopen(path, "rb");
     if (!f) return 0;
 
-    size_t data_len = 0, category_len = 0, extension_len = 0, filename_len = 0;
+    uint8_t version = 0;
+    int hret = try_read_header(f, X2S_FILE_TYPE_METADATA, &version);
+    if (hret == -1) { fclose(f); return 0; }
 
-    if (fread(&data_len, sizeof(size_t), 1, f) != 1 ||
-        fread(&category_len, sizeof(size_t), 1, f) != 1 ||
-        fread(&extension_len, sizeof(size_t), 1, f) != 1 ||
-        fread(&filename_len, sizeof(size_t), 1, f) != 1) {
-        fclose(f); return 0;
-    }
+    const FormatVtable *fmt = lookup_format(version);
+    if (!fmt || !fmt->read_metadata) { fclose(f); return 0; }
 
-    if (fread(out->owner, 1, 16, f) != 16) { fclose(f); return 0; }
-
-    /*  ACL  */
-    size_t acl_count = 0;
-    if (fread(&acl_count, sizeof(size_t), 1, f) != 1) { fclose(f); return 0; }
-    out->acl = calloc(1, sizeof(ACL));
-    if (acl_count > 0) {
-        out->acl->entries = calloc(acl_count, sizeof(ACLEntry));
-        out->acl->count = acl_count;
-        for (size_t i = 0; i < acl_count; i++) {
-            ACLEntry *e = &out->acl->entries[i];
-            if (fread(e->user_id, 1, 16, f) != 16 || fread(&e->permissions, sizeof(uint32_t), 1, f) != 1) {
-                free(out->acl->entries); free(out->acl); fclose(f); return 0;
-            }
-        }
-    }
-
-    /*  READ DATA HASH REFERENCE  */
-    unsigned char data_hash[32];
-    if (fread(data_hash, 1, 32, f) != 32) {
-        if (out->acl->entries) { 
-            free(out->acl->entries); 
-        } 
-        free(out->acl); 
-        fclose(f); 
-        return 0;
-    }
-
-    /*  METADATA  */
-    Metadata *metadata = calloc(1, sizeof(Metadata));
-    metadata->category  = read_string_field(f, category_len);
-    metadata->extension = read_string_field(f, extension_len);
-    metadata->filename  = read_string_field(f, filename_len);
-
-    /*  METADATA (KV pairs) — optional; gracefully handle old-format files  */
-    size_t metadata_count = 0;
-    if (fread(&metadata_count, sizeof(size_t), 1, f) != 1) {
-        if (feof(f)) {
-            metadata_count = 0; /* EOF: old format with no KV metadata */
-        } else {
-            free_metadata(metadata);
-            fclose(f);
-            return 0;
-        }
-    }
-    if (metadata_count > 0) {
-        metadata->metadata_keys   = calloc(metadata_count, sizeof(char *));
-        metadata->metadata_values = calloc(metadata_count, sizeof(char *));
-        if (!metadata->metadata_keys || !metadata->metadata_values) {
-            free_metadata(metadata); fclose(f); return 0;
-        }
-        metadata->metadata_count = metadata_count;
-        for (size_t i = 0; i < metadata_count; i++) {
-            size_t key_len = 0;
-            if (fread(&key_len, sizeof(size_t), 1, f) != 1) {
-                free_metadata(metadata); fclose(f); return 0;
-            }
-            metadata->metadata_keys[i] = read_string_field(f, key_len);
-            if (!metadata->metadata_keys[i]) {
-                free_metadata(metadata); fclose(f); return 0;
-            }
-            size_t value_len = 0;
-            if (fread(&value_len, sizeof(size_t), 1, f) != 1) {
-                free_metadata(metadata); fclose(f); return 0;
-            }
-            metadata->metadata_values[i] = read_string_field(f, value_len);
-            if (!metadata->metadata_values[i]) {
-                free_metadata(metadata); fclose(f); return 0;
-            }
-        }
-    }
+    if (!fmt->read_metadata(f, out)) { fclose(f); return 0; }
     fclose(f);
 
-    /*  READ THE ACTUAL BLOB FROM DEDUPLICATED STORAGE  */
-    void *data = NULL;
-    if (data_len > 0) {
+    memcpy(out->id, id, 32);
+    out->data = NULL;
+
+    if (out->size > 0) {
         char data_path[PATH_MAX_LEN + 128];
         char data_hex[65];
-        id_to_hex(data_hash, data_hex);
+        id_to_hex(out->data_hash, data_hex);
         snprintf(data_path, sizeof(data_path), "%s/data_%s", store->store_path, data_hex);
 
         FILE *df = fopen(data_path, "rb");
         if (!df) {
-            if (out->acl->entries) { 
-                free(out->acl->entries); 
-            } 
-            free(out->acl); 
-            free_metadata(metadata); 
+            if (out->acl && out->acl->entries) free(out->acl->entries);
+            free(out->acl);
+            free_metadata(out->metadata);
             return 0;
         }
-        
-        data = malloc(data_len);
-        if (!data || fread(data, 1, data_len, df) != data_len) {
-            free(data); 
-            fclose(df); 
-            if (out->acl->entries) { 
-                free(out->acl->entries); 
-            } 
-            free(out->acl); 
-            free_metadata(metadata); 
+
+        out->data = malloc(out->size);
+        if (!out->data || fread(out->data, 1, out->size, df) != out->size) {
+            free(out->data); out->data = NULL;
+            fclose(df);
+            if (out->acl && out->acl->entries) free(out->acl->entries);
+            free(out->acl);
+            free_metadata(out->metadata);
             return 0;
         }
         fclose(df);
     }
 
-    /*  finalize object  */
-    memcpy(out->id, id, 32);
-    out->size = data_len;
-    out->data = data;
-    out->metadata = metadata;
     return 1;
 }
 
@@ -547,66 +425,83 @@ void delete_data_blob_file(ObjectStore *store, const unsigned char data_hash[32]
     remove(data_path);
 }
 
+int try_read_header(FILE *f, uint8_t expected_type, uint8_t *out_version) {
+    x2s_file_header_t hdr;
+    long start = ftell(f);
+
+    if (fread(&hdr, sizeof(hdr), 1, f) != 1) {
+        clearerr(f);
+        fseek(f, start, SEEK_SET);
+        return 0;
+    }
+
+    if (hdr.magic[0] == X2S_MAGIC_0 && hdr.magic[1] == X2S_MAGIC_1 &&
+        hdr.file_type == expected_type) {
+        if (hdr.version > X2S_FORMAT_VERSION_1) {
+            return -1;
+        }
+        *out_version = hdr.version;
+        return 1;
+    }
+
+    fseek(f, start, SEEK_SET);
+    return 0;
+}
+
+int try_write_header(FILE *f, uint8_t file_type) {
+    return write_header(f, file_type, X2S_FORMAT_VERSION_1);
+}
+
 int load_index(ObjectStore *store) {
     char index_path[PATH_MAX_LEN + 16];
     snprintf(index_path, sizeof(index_path),
              "%s/__index", store->store_path);
 
     FILE *f = fopen(index_path, "rb");
-    if (!f) return 0; // first run, no index yet
+    if (!f) return 0;
+
+    uint8_t version = 0;
+    int hret = try_read_header(f, X2S_FILE_TYPE_INDEX, &version);
+    if (hret == -1) { fclose(f); return -1; }
+
+    const FormatVtable *fmt = lookup_format(version);
+    if (!fmt || !fmt->read_index) { fclose(f); return 0; }
 
     size_t capacity = 0;
     size_t count = 0;
+    unsigned char *ids = NULL;
 
-    if (fread(&capacity, sizeof(size_t), 1, f) != 1 ||
-        fread(&count, sizeof(size_t), 1, f) != 1) {
+    if (!fmt->read_index(f, &capacity, &count, &ids)) {
         fclose(f);
         return 0;
     }
+    fclose(f);
 
-    // If stored capacity differs, adjust store BEFORE inserting
     if (capacity != store->capacity) {
-        ObjectNode **new_buckets =
-            calloc(capacity, sizeof(ObjectNode *));
-        if (!new_buckets) {
-            fclose(f);
-            return 0;
-        }
-
+        ObjectNode **new_buckets = calloc(capacity, sizeof(ObjectNode *));
+        if (!new_buckets) { free(ids); return 0; }
         free(store->buckets);
         store->buckets = new_buckets;
         store->capacity = capacity;
     }
 
-    store->count = 0; // we'll recompute safely
+    store->count = 0;
 
     for (size_t i = 0; i < count; i++) {
-        unsigned char id[32];
-
-        if (fread(id, 1, 32, f) != 32) {
-            fclose(f);
-            return 0;
-        }
+        unsigned char *id = ids + i * 32;
 
         Object *index_obj = calloc(1, sizeof(Object));
-        if (!index_obj) {
-            fclose(f);
-            return 0;
-        }
+        if (!index_obj) { free(ids); return 0; }
 
-        /* Read the object file to populate the index's security fields */
         Object temporary_load = {0};
         if (read_object_file(store, id, &temporary_load)) {
-            // Copy security permissions into the index item
+            memcpy(index_obj->id, id, 32);
             memcpy(index_obj->owner, temporary_load.owner, 16);
             index_obj->acl = temporary_load.acl;
             index_obj->size = temporary_load.size;
-            
-            // Free the data and strings we don't need in the lightweight index
             free(temporary_load.data);
             free_metadata(temporary_load.metadata);
         } else {
-            // Fallback if file is corrupted/missing
             memcpy(index_obj->id, id, 32);
         }
 
@@ -617,19 +512,17 @@ int load_index(ObjectStore *store) {
                 free(index_obj->acl);
             }
             free(index_obj);
-            fclose(f);
+            free(ids);
             return 0;
         }
 
-        size_t index = index_for(store, id);
-
+        size_t idx = index_for(store, id);
         node->obj = index_obj;
-        node->next = store->buckets[index];
-        store->buckets[index] = node;
-
+        node->next = store->buckets[idx];
+        store->buckets[idx] = node;
         store->count++;
     }
 
-    fclose(f);
+    free(ids);
     return 1;
 }

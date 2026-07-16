@@ -40,6 +40,7 @@ typedef struct {
     FILE *data; // populated on get_object, NULL otherwise
     ACL *acl;
     unsigned char owner[16];
+    unsigned char data_hash[32]; // SHA-256 of data blob (stored in metadata file)
 } Object;
 
 /* Linked list node for hash buckets */
