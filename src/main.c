@@ -49,7 +49,14 @@ int main(int argc, char *argv[]) {
     return 1;
   }
 
-  user_store_load(users, store->store_path);
+  int ulr = user_store_load(users, store->store_path);
+  if (ulr == -1) {
+    fprintf(stderr, "error: __users has an unrecognized format version. "
+                    "Run x2s-migrate to upgrade.\n");
+    user_store_free(users);
+    free_store(store);
+    return 1;
+  }
 
   SessionStore *sessions = session_store_create(16);
   if (!sessions) {

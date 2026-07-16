@@ -58,6 +58,7 @@ add_executable(x2s
     src/obj_helpers.c
     src/api_helpers.c
     src/cli_setup.c
+    src/format_v1.c
     ${_cjson_c}
 )
 
@@ -70,6 +71,27 @@ target_include_directories(x2s PRIVATE
 target_link_libraries(x2s PRIVATE
     OpenSSL::Crypto
     ${MHD_LIBRARIES}
+)
+
+add_executable(x2s-migrate
+    src/migrate.c
+    src/obj_helpers.c
+    src/auth.c
+    src/format_v1.c
+    ${_cjson_c}
+)
+
+target_include_directories(x2s-migrate PRIVATE
+    src
+    ${EXTERNAL_INSTALL_LOCATION}
+)
+
+target_link_libraries(x2s-migrate PRIVATE
+    OpenSSL::Crypto
+)
+
+target_compile_options(x2s-migrate PRIVATE
+    -Wall -Wextra -Wpedantic
 )
 
 # Propagate any pkg-config compile flags (e.g. -D_REENTRANT on some distros)

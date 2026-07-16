@@ -237,3 +237,35 @@ See `config.example.json` for a full example. All fields are optional.
 * **No rate limiting** — `/auth/login` accepts unlimited requests; pair with external rate limiting for brute-force protection. (This is a future feature)
 
 For now, use a reverse proxy to rate limit and add TLS
+
+## Storage format & migration
+
+All on-disk files (`__users`, `__index`, and per-object metadata files) use a 4-byte header:
+
+```
+offset  size  field
+------  ----  ---------------------
+     0     2  magic bytes: 'X' '2'
+     2     1  file type: 1=metadata, 2=index, 3=users
+     3     1  format version (currently 1)
+```
+
+The version number allows future format changes. If the server encounters a file with an unrecognized version, it refuses to start and prints an upgrade hint.
+
+### Migrating existing data
+
+If you have a data directory from an older X2S version (before the format header was introduced), run:
+
+```bash
+./build/x2s-migrate ./x2s_data
+```
+
+This scans the directory, upgrades each legacy file by adding the header, and saves the original as a `.bak` file. The migration is idempotent — already-upgraded files are skipped.
+
+```bash
+# Example output
+Migration complete: 3 file(s) upgraded, 1 users, 1 index, 1 metadata
+0 file(s) skipped (already at latest version)
+```
+
+The `x2s-migrate` binary is built automatically alongside `x2s`.

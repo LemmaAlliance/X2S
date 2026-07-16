@@ -17,7 +17,7 @@ void object_path(ObjectStore *store, const unsigned char id[32],
     char *out, size_t out_len);
 int count_data_blob_references(ObjectStore *store, 
     const unsigned char target_data_hash[32], const unsigned char current_meta_id[32]);
-int compute_data_hash(const void *data, size_t size, unsigned char out[32]);
+int compute_data_hash(FILE *file, unsigned char out[32]);
 int write_object_file(ObjectStore *store, Object *obj);
 char *read_string_field(FILE *f, size_t len);
 int read_object_file(ObjectStore *store, const unsigned char id[32], Object *out);

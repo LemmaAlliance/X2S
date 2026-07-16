@@ -6,6 +6,8 @@
 #include <openssl/crypto.h>
 #include <time.h>
 #include "auth.h"
+#include "format.h"
+#include "format_registry.h"
 
 #define PBKDF2_ITERATIONS 400000
 #define PATH_MAX_LEN 4096
@@ -152,32 +154,24 @@ int user_store_save(UserStore *store, const char *path) {
     snprintf(file_path, sizeof(file_path), "%s/__users", path);
     snprintf(tmp_path, sizeof(tmp_path), "%s/__users.tmp", path);
 
+    const FormatVtable *fmt = latest_format();
+    if (!fmt || !fmt->write_users) return 0;
+
     FILE *f = fopen(tmp_path, "wb");
     if (!f) return 0;
 
-    if (fwrite(&store->count, sizeof(size_t), 1, f) != 1) {
-        fclose(f);
-        remove(tmp_path);
-        return 0;
+    if (!try_write_header(f, X2S_FILE_TYPE_USERS)) {
+        fclose(f); remove(tmp_path); return 0;
     }
 
-    for (size_t i = 0; i < store->count; i++) {
-        UserAccount *acct = &store->accounts[i];
-        if (fwrite(acct->username, 1, MAX_USERNAME + 1, f) != MAX_USERNAME + 1 ||
-            fwrite(acct->user_id, 1, 16, f) != 16 ||
-            fwrite(acct->password_hash, 1, HASH_SIZE, f) != HASH_SIZE ||
-            fwrite(acct->salt, 1, SALT_SIZE, f) != SALT_SIZE) {
-            fclose(f);
-            remove(tmp_path);
-            return 0;
-        }
+    if (!fmt->write_users(f, store)) {
+        fclose(f); remove(tmp_path); return 0;
     }
 
     fclose(f);
 
     if (rename(tmp_path, file_path) != 0) {
-        remove(tmp_path);
-        return 0;
+        remove(tmp_path); return 0;
     }
 
     return 1;
@@ -190,37 +184,17 @@ int user_store_load(UserStore *store, const char *path) {
     FILE *f = fopen(file_path, "rb");
     if (!f) return 0;
 
-    size_t count = 0;
-    if (fread(&count, sizeof(size_t), 1, f) != 1) {
-        fclose(f);
-        return 0;
-    }
+    uint8_t version = 0;
+    int hret = try_read_header(f, X2S_FILE_TYPE_USERS, &version);
+    if (hret == -1) { fclose(f); return -1; }
+
+    const FormatVtable *fmt = lookup_format(version);
+    if (!fmt || !fmt->read_users) { fclose(f); return 0; }
 
     store->count = 0;
-
-    for (size_t i = 0; i < count; i++) {
-        if (store->count == store->capacity) {
-            if (!user_store_grow(store)) {
-                fclose(f);
-                return 0;
-            }
-        }
-
-        UserAccount *acct = &store->accounts[store->count];
-
-        if (fread(acct->username, 1, MAX_USERNAME + 1, f) != MAX_USERNAME + 1 ||
-            fread(acct->user_id, 1, 16, f) != 16 ||
-            fread(acct->password_hash, 1, HASH_SIZE, f) != HASH_SIZE ||
-            fread(acct->salt, 1, SALT_SIZE, f) != SALT_SIZE) {
-            fclose(f);
-            return 0;
-        }
-
-        store->count++;
-    }
-
+    int ret = fmt->read_users(f, store);
     fclose(f);
-    return 1;
+    return ret;
 }
 
 SessionStore *session_store_create(size_t initial_capacity) {

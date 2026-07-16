@@ -6,6 +6,10 @@
 #include <openssl/evp.h>
 #include "obj_structs.h"
 #include "obj_helpers.h"
+#include "format.h"
+#include "format_registry.h"
+
+void free_store(ObjectStore *store);
 
 /* Create store */
 
@@ -32,7 +36,13 @@ ObjectStore *create_store(size_t initial_capacity, const char *path) {
     }
 
     // Try to restore previous index (if it exists)
-    load_index(store);
+    int lr = load_index(store);
+    if (lr == -1) {
+        fprintf(stderr, "error: __index has an unrecognized format version. "
+                        "Run x2s-migrate to upgrade.\n");
+        free_store(store);
+        return NULL;
+    }
 
     return store;
 }
@@ -102,46 +112,42 @@ static int write_index(ObjectStore *store) {
 
     snprintf(index_path, sizeof(index_path),
              "%s/__index", store->store_path);
-
     snprintf(tmp_path, sizeof(tmp_path),
              "%s/__index.tmp", store->store_path);
 
-    FILE *f = fopen(tmp_path, "wb");
-    if (!f) return 0;
+    const FormatVtable *fmt = latest_format();
+    if (!fmt || !fmt->write_index) return 0;
 
-    // Write capacity first (NEW)
-    if (fwrite(&store->capacity, sizeof(size_t), 1, f) != 1) {
-        fclose(f);
-        remove(tmp_path);
-        return 0;
-    }
-
-    // Then count
-    if (fwrite(&store->count, sizeof(size_t), 1, f) != 1) {
-        fclose(f);
-        remove(tmp_path);
-        return 0;
-    }
-
-    // Write all IDs
-    for (size_t i = 0; i < store->capacity; i++) {
-        ObjectNode *node = store->buckets[i];
-
-        while (node) {
-            if (fwrite(node->obj->id, 32, 1, f) != 1) {
-                fclose(f);
-                remove(tmp_path);
-                return 0;
+    unsigned char *ids = NULL;
+    if (store->count > 0) {
+        ids = malloc(store->count * 32);
+        if (!ids) return 0;
+        size_t pos = 0;
+        for (size_t i = 0; i < store->capacity; i++) {
+            ObjectNode *node = store->buckets[i];
+            while (node) {
+                memcpy(ids + pos * 32, node->obj->id, 32);
+                pos++;
+                node = node->next;
             }
-            node = node->next;
         }
     }
 
+    FILE *f = fopen(tmp_path, "wb");
+    if (!f) { free(ids); return 0; }
+
+    if (!try_write_header(f, X2S_FILE_TYPE_INDEX)) {
+        fclose(f); remove(tmp_path); free(ids); return 0;
+    }
+
+    int ok = fmt->write_index(f, store->capacity, store->count, ids);
     fclose(f);
+    free(ids);
+
+    if (!ok) { remove(tmp_path); return 0; }
 
     if (rename(tmp_path, index_path) != 0) {
-        remove(tmp_path);
-        return 0;
+        remove(tmp_path); return 0;
     }
 
     return 1;
@@ -347,24 +353,19 @@ int remove_object(ObjectStore *store, User *user, const unsigned char id[32]) {
             
             FILE *f = fopen(path, "rb");
             if (f) {
-                size_t d_len, c_len, e_len, f_len;
-                if (fread(&d_len, sizeof(size_t), 1, f) == 1 &&
-                    fread(&c_len, sizeof(size_t), 1, f) == 1 &&
-                    fread(&e_len, sizeof(size_t), 1, f) == 1 &&
-                    fread(&f_len, sizeof(size_t), 1, f) == 1) {
-                    
-                    fseek(f, 16, SEEK_CUR); // Skip owner
-                    size_t acl_count = 0;
-                    if (fread(&acl_count, sizeof(size_t), 1, f) == 1) {
-                        fseek(f, acl_count * (16 + sizeof(uint32_t)), SEEK_CUR); // Skip ACLs
-                        if (fread(data_hash, 1, 32, f) == 32) {
-                            hash_read_success = 1;
-                        }
-                    }
+                uint8_t version = 0;
+                int hret = try_read_header(f, X2S_FILE_TYPE_METADATA, &version);
+                if (hret == -1) { fclose(f); goto skip_data_blob; }
+
+                const FormatVtable *fmt = lookup_format(version);
+                if (fmt && fmt->read_data_hash &&
+                    fmt->read_data_hash(f, data_hash)) {
+                    hash_read_success = 1;
                 }
                 fclose(f);
             }
 
+skip_data_blob:
             /* 3. Un-link from the in-memory indexing bucket sequence */
             if (prev) {
                 prev->next = node->next;
