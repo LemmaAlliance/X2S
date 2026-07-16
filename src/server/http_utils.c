@@ -7,28 +7,6 @@
 #include "core/object_types.h"
 #include "server/http_utils.h"
 
-enum MHD_Result send_error(struct MHD_Connection *conn,
-                                  unsigned int status, const char *msg) {
-    size_t json_len = strlen(msg) + 12;
-    char *json = malloc(json_len + 1);
-    if (!json)
-        return MHD_NO;
-
-    snprintf(json, json_len + 1, "{\"error\":\"%s\"}", msg);
-
-    struct MHD_Response *resp =
-        MHD_create_response_from_buffer(json_len, json, MHD_RESPMEM_MUST_FREE);
-    if (!resp) {
-        free(json);
-        return MHD_NO;
-    }
-
-    MHD_add_response_header(resp, "Content-Type", "application/json");
-    enum MHD_Result ret = MHD_queue_response(conn, status, resp);
-    MHD_destroy_response(resp);
-    return ret;
-}
-
 char *json_escape(const char *s) {
     if (!s) return NULL;
     size_t len = strlen(s);

@@ -246,7 +246,6 @@ char *session_create(SessionStore *store, const unsigned char user_id[16]) {
     bytes_to_hex(s->token, TOKEN_SIZE, hex);
 
     time_t now = time(NULL);
-    s->expiry = now;
     s->expiry = now + TOKEN_EXPIRY_SECONDS;
     store->count++;
     return hex;
@@ -294,7 +293,7 @@ void check_token_expiry(SessionStore *store) {
             }
             write_index++;
         } else {
-            // Clear memory of expired token for saftey
+            // Clear memory of expired token for safety
             memset(&store->sessions[read_index], 0, sizeof(Session));
         }
     }

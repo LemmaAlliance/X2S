@@ -37,7 +37,7 @@ typedef struct {
     unsigned char id[32];
     size_t size;
     Metadata *metadata;
-    FILE *data;
+    unsigned char *data;
     ACL *acl;
     unsigned char owner[16];
     unsigned char data_hash[32];

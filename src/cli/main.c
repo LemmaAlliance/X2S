@@ -9,7 +9,8 @@
 #include <sys/stat.h>
 #include <unistd.h>
 
-#define MAIN_SLEEP_MS 100000
+/* Sleep duration in microseconds (100000 us = 100 ms) */
+#define MAIN_SLEEP_US 100000
 
 static volatile int running = 1;
 
@@ -92,9 +93,8 @@ int main(int argc, char *argv[]) {
   printf("Press Ctrl-C to stop.\n\n");
 
   signal(SIGINT, handle_sigint);
-  while (running){
-    usleep(MAIN_SLEEP_MS);
-    // sleep(1);
+  while (running) {
+    usleep(MAIN_SLEEP_US);
     check_token_expiry(sessions);
   }
 

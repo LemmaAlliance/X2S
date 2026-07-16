@@ -47,7 +47,7 @@ int write_object_file(ObjectStore *store, Object *obj) {
     const FormatVtable *fmt = latest_format();
     if (!fmt || !fmt->write_metadata) return 0;
 
-    if (!compute_data_hash(obj->data, obj->data_hash)) return 0;
+    if (!compute_data_hash(obj->data, obj->size, obj->data_hash)) return 0;
 
     FILE *f = fopen(path, "wb");
     if (!f) return 0;
@@ -74,15 +74,9 @@ int write_object_file(ObjectStore *store, Object *obj) {
         df = fopen(data_path, "wb");
         if (df) {
             if (obj->size > 0 && obj->data) {
-                fseek(obj->data, 0, SEEK_SET);
-                char buffer[4096];
-                size_t bytes_to_read = obj->size;
-                while (bytes_to_read > 0) {
-                    size_t chunk = (bytes_to_read < sizeof(buffer)) ? bytes_to_read : sizeof(buffer);
-                    size_t n = fread(buffer, 1, chunk, obj->data);
-                    if (n == 0) break;
-                    fwrite(buffer, 1, n, df);
-                    bytes_to_read -= n;
+                if (fwrite(obj->data, 1, obj->size, df) != obj->size) {
+                    fclose(df);
+                    return 0;
                 }
             }
             fclose(df);

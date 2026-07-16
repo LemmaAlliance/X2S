@@ -164,6 +164,22 @@ static enum MHD_Result handle_put(struct MHD_Connection *conn,
   if (ub->len == 0)
     return send_error_cors(conn, server->cors_origin, MHD_HTTP_BAD_REQUEST, "empty body");
 
+  /* Read temp file into byte buffer, then close the file */
+  rewind(ub->fp);
+  unsigned char *data_buf = malloc(ub->len);
+  if (!data_buf) {
+    fclose(ub->fp);
+    return MHD_NO;
+  }
+  if (fread(data_buf, 1, ub->len, ub->fp) != ub->len) {
+    free(data_buf);
+    fclose(ub->fp);
+    return send_error_cors(conn, server->cors_origin, MHD_HTTP_INTERNAL_SERVER_ERROR,
+                      "failed to read upload data");
+  }
+  fclose(ub->fp);
+  ub->fp = NULL;
+
   /* Read optional metadata headers */
   const char *category = MHD_lookup_connection_value(conn, MHD_HEADER_KIND, "X-Category");
   const char *extension = MHD_lookup_connection_value(conn, MHD_HEADER_KIND, "X-Extension");
@@ -200,7 +216,7 @@ static enum MHD_Result handle_put(struct MHD_Connection *conn,
   };
 
   Object obj = {0};
-  obj.data = ub->fp;
+  obj.data = data_buf;
   obj.size = ub->len;
   obj.metadata = (category || extension || filename || meta_kv_count > 0) ? &meta : NULL;
 
@@ -208,8 +224,7 @@ static enum MHD_Result handle_put(struct MHD_Connection *conn,
   get_user_from_request(conn, &user, server->tokens);
 
   if (!put_object(server->store, &user, &obj)) {
-    fclose(ub->fp);
-    ub->fp = NULL;
+    if (obj.data) free(obj.data);
     free_metadata_kv(meta_kv_keys, meta_kv_values, meta_kv_count);
     return send_error_cors(conn, server->cors_origin, MHD_HTTP_INTERNAL_SERVER_ERROR,
                       "failed to store object");
@@ -217,9 +232,8 @@ static enum MHD_Result handle_put(struct MHD_Connection *conn,
 
   free_metadata_kv(meta_kv_keys, meta_kv_values, meta_kv_count);
 
-  /* Close temporary file after successful storage */
-  fclose(ub->fp);
-  ub->fp = NULL;
+  /* put_object frees data on dedup (sets obj.data to NULL), otherwise we own it */
+  if (obj.data) free(obj.data);
 
   /* Build response: {"id":"<64 hex chars>"}*/
   char json[80];

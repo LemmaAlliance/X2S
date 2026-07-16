@@ -1,16 +1,11 @@
 #include <string.h>
-#include <stdio.h>
 #include <openssl/evp.h>
 #include "core/object_types.h"
 #include "crypto/object_crypto.h"
 
-static int hash_file_stream(EVP_MD_CTX *ctx, FILE *file) {
-    unsigned char buffer[4096];
-    size_t bytes_read;
-    while ((bytes_read = fread(buffer, 1, sizeof(buffer), file)) > 0) {
-        if (!EVP_DigestUpdate(ctx, buffer, bytes_read)) return 0;
-    }
-    return !ferror(file);
+static int digest_update_str(EVP_MD_CTX *ctx, const char *s) {
+    if (!s) return 1;
+    return EVP_DigestUpdate(ctx, s, strlen(s));
 }
 
 int compute_object_id(User *user, Object *obj, unsigned char out[32]) {
@@ -30,56 +25,22 @@ int compute_object_id(User *user, Object *obj, unsigned char out[32]) {
     }
 
     if (obj->data && obj->size > 0) {
-        if (fseek(obj->data, 0, SEEK_SET) != 0) {
-            EVP_MD_CTX_free(ctx);
-            return 0;
-        }
-
-        if (!hash_file_stream(ctx, obj->data)) {
-            EVP_MD_CTX_free(ctx);
-            return 0;
-        }
-
-        if (ferror(obj->data)) {
-            EVP_MD_CTX_free(ctx);
-            return 0;
-        }
-
-        if (fseek(obj->data, 0, SEEK_SET) != 0) {
+        if (!EVP_DigestUpdate(ctx, obj->data, obj->size)) {
             EVP_MD_CTX_free(ctx);
             return 0;
         }
     }
 
     if (obj->metadata) {
-        if (obj->metadata->category &&
-            !EVP_DigestUpdate(ctx, obj->metadata->category,
-                              strlen(obj->metadata->category))) {
-            EVP_MD_CTX_free(ctx);
-            return 0;
-        }
-        if (obj->metadata->extension &&
-            !EVP_DigestUpdate(ctx, obj->metadata->extension,
-                              strlen(obj->metadata->extension))) {
-            EVP_MD_CTX_free(ctx);
-            return 0;
-        }
-        if (obj->metadata->filename &&
-            !EVP_DigestUpdate(ctx, obj->metadata->filename,
-                              strlen(obj->metadata->filename))) {
+        if (!digest_update_str(ctx, obj->metadata->category) ||
+            !digest_update_str(ctx, obj->metadata->extension) ||
+            !digest_update_str(ctx, obj->metadata->filename)) {
             EVP_MD_CTX_free(ctx);
             return 0;
         }
         for (size_t i = 0; i < obj->metadata->metadata_count; i++) {
-            if (obj->metadata->metadata_keys[i] &&
-                !EVP_DigestUpdate(ctx, obj->metadata->metadata_keys[i],
-                                  strlen(obj->metadata->metadata_keys[i]))) {
-                EVP_MD_CTX_free(ctx);
-                return 0;
-            }
-            if (obj->metadata->metadata_values[i] &&
-                !EVP_DigestUpdate(ctx, obj->metadata->metadata_values[i],
-                                  strlen(obj->metadata->metadata_values[i]))) {
+            if (!digest_update_str(ctx, obj->metadata->metadata_keys[i]) ||
+                !digest_update_str(ctx, obj->metadata->metadata_values[i])) {
                 EVP_MD_CTX_free(ctx);
                 return 0;
             }
@@ -96,9 +57,7 @@ int compute_object_id(User *user, Object *obj, unsigned char out[32]) {
     return 1;
 }
 
-int compute_data_hash(FILE *file, unsigned char out[32]) {
-    if (!file) return 0;
-
+int compute_data_hash(const unsigned char *data, size_t size, unsigned char out[32]) {
     EVP_MD_CTX *ctx = EVP_MD_CTX_new();
     if (!ctx) return 0;
 
@@ -107,14 +66,11 @@ int compute_data_hash(FILE *file, unsigned char out[32]) {
         return 0;
     }
 
-    if (!hash_file_stream(ctx, file)) {
-        EVP_MD_CTX_free(ctx);
-        return 0;
-    }
-
-    if (ferror((FILE *)file)) {
-        EVP_MD_CTX_free(ctx);
-        return 0;
+    if (data && size > 0) {
+        if (!EVP_DigestUpdate(ctx, data, size)) {
+            EVP_MD_CTX_free(ctx);
+            return 0;
+        }
     }
 
     unsigned int len = 0;
