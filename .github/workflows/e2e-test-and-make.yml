@@ -63,6 +63,8 @@ jobs:
           -H 'X-Filename: hello.txt' \
           -H 'X-Category: documents' \
           -H 'X-Extension: txt' \
+          -H 'X-Metadata-Author: Alice' \
+          -H 'X-Metadata-Version: 2' \
           -d 'Hello, World!')
 
           echo "response=$RESPONSE" >> $GITHUB_OUTPUT
@@ -80,6 +82,41 @@ jobs:
               echo "Error: Uploaded object not found in owned objects."
               exit 1
           fi
+
+      - name: Verify metadata in list response
+        run: |
+          LIST_RESPONSE=$(curl -H "Authorization: Bearer ${{ steps.create_account.outputs.auth_token }}" \
+          -X GET "http://localhost:8080/objects")
+
+          EXPECTED_ID=$(echo '${{ steps.upload_object.outputs.response }}' | jq -r '.id')
+
+          META_AUTHOR=$(echo "$LIST_RESPONSE" | jq -r --arg id "$EXPECTED_ID" '.objects[] | select(.id == $id) | .metadata.Author')
+          if [ "$META_AUTHOR" != "Alice" ]; then
+              echo "Error: Expected metadata Author=Alice, got '$META_AUTHOR'"
+              exit 1
+          fi
+
+          META_VERSION=$(echo "$LIST_RESPONSE" | jq -r --arg id "$EXPECTED_ID" '.objects[] | select(.id == $id) | .metadata.Version')
+          if [ "$META_VERSION" != "2" ]; then
+              echo "Error: Expected metadata Version=2, got '$META_VERSION'"
+              exit 1
+          fi
+
+          echo "Metadata verification passed."
+
+      - name: Filter by metadata_key
+        run: |
+          FILTER_RESPONSE=$(curl -H "Authorization: Bearer ${{ steps.create_account.outputs.auth_token }}" \
+          -X GET "http://localhost:8080/objects?metadata_key=Author&metadata_value=Alice")
+
+          EXPECTED_ID=$(echo '${{ steps.upload_object.outputs.response }}' | jq -r '.id')
+
+          if ! echo "$FILTER_RESPONSE" | jq --arg id "$EXPECTED_ID" '.objects[] | select(.id == $id)' | grep -q "$EXPECTED_ID"; then
+              echo "Error: Filter by metadata_key=Author did not find the object."
+              exit 1
+          fi
+
+          echo "Filter by metadata_key passed."
 
       - name: Access object with good auth
         run: |
