@@ -397,7 +397,7 @@ static enum MHD_Result handle_list_objects(struct MHD_Connection *conn, ApiServe
 
       size_t needed = strlen(hex_id) + strlen(obj_cat) + strlen(obj_fn) + strlen(obj_ext) + meta_json_len + 200; /* +200: JSON object format string overhead */
 
-      if (json_len + needed >= json_cap) {
+      while (json_len + needed >= json_cap) {
           json_cap *= 2;
           char *tmp = realloc(json, json_cap);
           if (!tmp) {
