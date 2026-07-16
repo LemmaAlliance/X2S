@@ -438,8 +438,25 @@ static enum MHD_Result handle_list_objects(struct MHD_Connection *conn, ApiServe
       json_len += (size_t)res;
   }
 
-  strcat(json, "]}");
-  json_len = strlen(json);
+  if (json_len + 3 > json_cap) {
+      size_t new_cap = json_len + 3;
+      char *tmp = realloc(json, new_cap);
+      if (!tmp) {
+          for (size_t i = 0; i < count; i++) {
+              free(objects[i]->data);
+              if (objects[i]->acl) { free(objects[i]->acl->entries); free(objects[i]->acl); }
+              free_metadata(objects[i]->metadata);
+              free(objects[i]);
+          }
+          free(objects);
+          free(json);
+          return MHD_NO;
+      }
+      json = tmp;
+      json_cap = new_cap;
+  }
+  memcpy(json + json_len, "]}", 3);
+  json_len += 2;
 
   for (size_t i = 0; i < count; i++) {
       free(objects[i]->data);
