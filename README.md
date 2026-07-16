@@ -3,7 +3,6 @@
 A lightweight, RESTful blob storage server written in C11. Upload and retrieve binary objects identified by their SHA-256 content hash, with per-object ACLs and user authentication.
 
 ## Quick start
-
 ```bash
 # update package repos
 sudo apt update
@@ -14,15 +13,21 @@ sudo apt install build-essential cmake libmicrohttpd-dev libssl-dev
 # build
 cmake -S . -B build && cmake --build build
 
-# run
+# run (defaults: port 8080, data dir ./x2s_data, no config required)
 ./build/x2s
 
+# or with a config file
+./build/x2s --config config.example.json
+
 ```
 
 ```
+
 Welcome to X2S — eXtremely Simple Storage
 Listening on http://0.0.0.0:8080
 Allowed CORS Origin: *
+Data directory: ./x2s_data
+Temporary directory: /tmp/x2s
   POST  /auth/register      register a new user
   POST  /auth/login          authenticate and get a token
   POST  /auth/logout         invalidate a token
@@ -30,6 +35,7 @@ Allowed CORS Origin: *
   GET   /objects             list owned objects
   GET   /objects/<id>        retrieve an object
   DELETE /objects/<id>       remove an object
+  POST  /objects/<id>/share  share an object with another user
 Press Ctrl-C to stop.
 
 ```
@@ -72,19 +78,21 @@ X2S employs a **Content-Addressable Storage (CAS)** paradigm where file contents
 * **Sharing:** An owner can dynamically grant permissions to another user via the `/share` endpoint.
 
 ```bash
-# upload
+# upload (with optional X-Metadata-* headers)
 curl -X POST http://localhost:8080/objects \
   -H 'Authorization: Bearer <token>' \
   -H 'X-Filename: hello.txt' \
   -H 'X-Category: documents' \
   -H 'X-Extension: txt' \
+  -H 'X-Metadata-Author: Alice' \
+  -H 'X-Metadata-Version: 2' \
   -d 'Hello, World!'
 # → {"id":"63a46a45f4bcc89a04adfefccdfdbb5b66a659d92cb54dd2bdb4e1705d06996a"}
 
 # list all files you have access to (with optional query filters)
 curl -H 'Authorization: Bearer <token>' \
   "http://localhost:8080/objects?category=documents&extension=txt"
-# → {"objects":[{"id":"63a46a45...","category":"documents","filename":"hello.txt","extension":"txt","size":13}]}
+# → {"objects":[{"id":"63a46a45...","category":"documents","filename":"hello.txt","extension":"txt","size":13,"metadata":{"Author":"Alice","Version":"2"}}]}
 
 # download
 curl -H 'Authorization: Bearer <token>' \
@@ -110,6 +118,8 @@ You can filter results by appending optional URL query strings:
 * `category`: Filters items by exact string equality against their `X-Category` metadata properties.
 * `filename`: Filters items by exact string equality against their original `X-Filename` properties.
 * `extension`: Filters items by exact string equality against their `X-Extension` metadata properties.
+* `metadata_key`: Filters items that have an `X-Metadata-<key>` header matching the given key name.
+* `metadata_value`: Filters items by the value of the matched `metadata_key` (when used alone without `metadata_key`, it has no effect).
 
 #### Reference-Checked Deletion (`DELETE /objects/<id>`)
 
@@ -138,6 +148,7 @@ Allows the object **owner** to append or update access permissions for a specifi
 | `X-Category` | Arbitrary category tag used for indexing and filtering discovery results |
 | `X-Extension` | File extension (no dot); used for query filtering and evaluating `Content-Type` on download |
 | `X-Filename` | Original filename string used for filtering discovery lists |
+| `X-Metadata-*` | Arbitrary key-value metadata (the header name suffix becomes the key); included in listing JSON and filterable via `metadata_key` / `metadata_value` query params |
 
 ## Error responses
 
@@ -166,7 +177,7 @@ All errors return JSON:
 
 All persistent storage files live in `./x2s_data/` and adhere to a split model layout:
 
-* **Metadata Tracking Files (`./x2s_data/<object_id>`)**: Named by a 64-character hex hash that is unique per user upload. The binary layout stores data length, metadata lengths, owner ID (16 bytes), ACL structures, a **32-byte SHA-256 pointer hash of the data content block**, and user metadata strings.
+* **Metadata Tracking Files (`./x2s_data/<object_id>`)**: Named by a 64-character hex hash that is unique per user upload. The binary layout stores data length, metadata lengths, owner ID (16 bytes), ACL structures, a **32-byte SHA-256 pointer hash of the data content block**, user metadata strings, and arbitrary key-value metadata pairs from `X-Metadata-*` headers.
 * **Shared Data Blobs (`./x2s_data/data_<data_hash>`)**: Named with a `data_` prefix followed by the 64-character hex hash of the *raw contents alone*. This file is decoupled from usernames, access tokens, and access patterns.
 * **In-memory index**: A chained hash table (FNV-1a) maps object tracking IDs to lightweight entries. Resizes when load factor exceeds 0.75. Persisted atomically (temp file + rename) to `./x2s_data/__index`. Modifying object ACLs rewrites the associated object metadata file and updates this volatile cache.
 * **User accounts**: Stored as binary at `./x2s_data/__users`. Survive server restarts. Sessions are ephemeral and lost on restart (re-login required).
@@ -188,12 +199,30 @@ cmake -S . -B build && cmake --build build
 
 ```
 
-### Run on a custom port
+### Usage
 
 ```bash
-./build/x2s 9090
+./build/x2s [--config path] [--help]
 
 ```
+
+### Configuration
+
+X2S can be configured via a JSON config file using the `--config` flag:
+
+```bash
+./build/x2s --config config.example.json
+
+```
+
+| Field | Default | Description |
+| --- | --- | --- |
+| `port` | `8080` | HTTP listen port |
+| `cors_origin` | `*` | Allowed CORS origin |
+| `data_directory` | `./x2s_data` | Persistent storage directory |
+| `temporary_directory` | `/tmp/x2s` | Temporary upload directory |
+
+See `config.example.json` for a full example. All fields are optional.
 
 ## Design notes
 
