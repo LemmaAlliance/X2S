@@ -365,7 +365,9 @@ static enum MHD_Result handle_list_objects(struct MHD_Connection *conn, ApiServe
       const char *obj_fn = (objects[i]->metadata && objects[i]->metadata->filename) ? objects[i]->metadata->filename : "";
       const char *obj_ext = (objects[i]->metadata && objects[i]->metadata->extension) ? objects[i]->metadata->extension : "";
 
-      /* Build metadata JSON fragment: "key":"value","key2":"value2" */
+      char *ecat = json_escape(obj_cat);
+      char *efn  = json_escape(obj_fn);
+      char *eext = json_escape(obj_ext);
       char *meta_json = NULL;
       size_t meta_json_len = 0;
       if (objects[i]->metadata && objects[i]->metadata->metadata_count > 0) {
@@ -395,7 +397,8 @@ static enum MHD_Result handle_list_objects(struct MHD_Connection *conn, ApiServe
           }
       }
 
-      size_t needed = strlen(hex_id) + strlen(obj_cat) + strlen(obj_fn) + strlen(obj_ext) + meta_json_len + 200; /* +200: JSON object format string overhead */
+      size_t needed = strlen(hex_id) + meta_json_len + 200
+          + 6 * strlen(obj_cat) + 6 * strlen(obj_fn) + 6 * strlen(obj_ext);
 
       while (json_len + needed >= json_cap) {
           json_cap *= 2;
@@ -409,33 +412,36 @@ static enum MHD_Result handle_list_objects(struct MHD_Connection *conn, ApiServe
               }
               free(objects);
               free(json);
+              free(ecat); free(efn); free(eext);
               free(meta_json);
               return MHD_NO;
           }
           json = tmp;
       }
 
-      if (json_len >= json_cap) {
-        free(meta_json);
-        break;
-      }
+      if (json_len >= json_cap)
+        goto loop_cleanup;
+
       size_t remaining = json_cap - json_len;
 
       int res = snprintf(json + json_len, remaining, 
                  "%s{\"id\":\"%s\",\"category\":\"%s\",\"filename\":\"%s\",\"extension\":\"%s\",\"size\":%zu,\"metadata\":%s}", 
-                 (i > 0) ? "," : "", hex_id, obj_cat, obj_fn, obj_ext, objects[i]->size,
+                 (i > 0) ? "," : "", hex_id,
+                 ecat, efn, eext,
+                 objects[i]->size,
                  meta_json ? meta_json : "{}");
-      
-      free(meta_json);
-      if (res < 0) {
-        break;
-      }
 
-      if ((size_t)res >= remaining) {
-        break;
-      }
+      free(meta_json);
+      meta_json = NULL;
+
+      if (res < 0 || (size_t)res >= remaining)
+        goto loop_cleanup;
 
       json_len += (size_t)res;
+
+loop_cleanup:
+      free(meta_json);
+      free(ecat); free(efn); free(eext);
   }
 
   if (json_len + 3 > json_cap) {
