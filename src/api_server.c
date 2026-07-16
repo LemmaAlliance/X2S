@@ -336,146 +336,146 @@ static enum MHD_Result handle_list_objects(struct MHD_Connection *conn, ApiServe
   size_t count = 0;
 
   if (!list_user_objects(server->store, &user, category, filename, extension, metadata_key, metadata_value, &objects, &count)) {
-      return send_error_cors(conn, server->cors_origin, MHD_HTTP_INTERNAL_SERVER_ERROR, "failed to read index files");
+    return send_error_cors(conn, server->cors_origin, MHD_HTTP_INTERNAL_SERVER_ERROR, "failed to read index files");
   }
 
   size_t json_cap = 1024;
   char *json = malloc(json_cap);
   if (!json) {
-      for (size_t i = 0; i < count; i++) {
-          free(objects[i]->data);
-          if (objects[i]->acl) { free(objects[i]->acl->entries); free(objects[i]->acl); }
-          free_metadata(objects[i]->metadata);
-          free(objects[i]);
-      }
-      free(objects);
-      return MHD_NO;
+    for (size_t i = 0; i < count; i++) {
+      free(objects[i]->data);
+      if (objects[i]->acl) { free(objects[i]->acl->entries); free(objects[i]->acl); }
+      free_metadata(objects[i]->metadata);
+      free(objects[i]);
+    }
+    free(objects);
+    return MHD_NO;
   }
 
   strcpy(json, "{\"objects\":[");
   size_t json_len = strlen(json);
 
   for (size_t i = 0; i < count; i++) {
-      char hex_id[65] = {0};
-      for (int j = 0; j < 32; j++) {
-          snprintf(hex_id + j * 2, 3, "%02x", objects[i]->id[j]);
+    char hex_id[65] = {0};
+    for (int j = 0; j < 32; j++) {
+      snprintf(hex_id + j * 2, 3, "%02x", objects[i]->id[j]);
+    }
+
+    const char *obj_cat = (objects[i]->metadata && objects[i]->metadata->category) ? objects[i]->metadata->category : "";
+    const char *obj_fn = (objects[i]->metadata && objects[i]->metadata->filename) ? objects[i]->metadata->filename : "";
+    const char *obj_ext = (objects[i]->metadata && objects[i]->metadata->extension) ? objects[i]->metadata->extension : "";
+
+    char *ecat = json_escape(obj_cat);
+    char *efn  = json_escape(obj_fn);
+    char *eext = json_escape(obj_ext);
+    char *meta_json = NULL;
+    size_t meta_json_len = 0;
+    if (objects[i]->metadata && objects[i]->metadata->metadata_count > 0) {
+      size_t meta_json_cap = 256;
+      for (size_t m = 0; m < objects[i]->metadata->metadata_count; m++) {
+        if (objects[i]->metadata->metadata_keys[m])
+          meta_json_cap += 6 * strlen(objects[i]->metadata->metadata_keys[m]) + 8;
+        if (objects[i]->metadata->metadata_values[m])
+          meta_json_cap += 6 * strlen(objects[i]->metadata->metadata_values[m]) + 8;
       }
-
-      const char *obj_cat = (objects[i]->metadata && objects[i]->metadata->category) ? objects[i]->metadata->category : "";
-      const char *obj_fn = (objects[i]->metadata && objects[i]->metadata->filename) ? objects[i]->metadata->filename : "";
-      const char *obj_ext = (objects[i]->metadata && objects[i]->metadata->extension) ? objects[i]->metadata->extension : "";
-
-      char *ecat = json_escape(obj_cat);
-      char *efn  = json_escape(obj_fn);
-      char *eext = json_escape(obj_ext);
-      char *meta_json = NULL;
-      size_t meta_json_len = 0;
-      if (objects[i]->metadata && objects[i]->metadata->metadata_count > 0) {
-          size_t meta_json_cap = 256;
-          for (size_t m = 0; m < objects[i]->metadata->metadata_count; m++) {
-              if (objects[i]->metadata->metadata_keys[m])
-                  meta_json_cap += 6 * strlen(objects[i]->metadata->metadata_keys[m]) + 8;
-              if (objects[i]->metadata->metadata_values[m])
-                  meta_json_cap += 6 * strlen(objects[i]->metadata->metadata_values[m]) + 8;
-          }
-          meta_json = malloc(meta_json_cap);
-          if (meta_json) {
-              size_t pos = 0;
-              pos += snprintf(meta_json + pos, meta_json_cap - pos, "{");
-              for (size_t m = 0; m < objects[i]->metadata->metadata_count; m++) {
-                  if (!objects[i]->metadata->metadata_keys[m]) continue;
-                  char *ek = json_escape(objects[i]->metadata->metadata_keys[m]);
-                  char *ev = json_escape(objects[i]->metadata->metadata_values[m]);
-                  int n = snprintf(meta_json + pos, meta_json_cap - pos,
-                      "%s\"%s\":\"%s\"", (pos > 1) ? "," : "",
-                      ek ? ek : "", ev ? ev : "");
-                  if (n > 0) pos += (size_t)n;
-                  free(ek); free(ev);
-              }
-              snprintf(meta_json + pos, meta_json_cap - pos, "}");
-              meta_json_len = strlen(meta_json);
-          }
+      meta_json = malloc(meta_json_cap);
+      if (meta_json) {
+        size_t pos = 0;
+        pos += snprintf(meta_json + pos, meta_json_cap - pos, "{");
+        for (size_t m = 0; m < objects[i]->metadata->metadata_count; m++) {
+          if (!objects[i]->metadata->metadata_keys[m]) continue;
+          char *ek = json_escape(objects[i]->metadata->metadata_keys[m]);
+          char *ev = json_escape(objects[i]->metadata->metadata_values[m]);
+          int n = snprintf(meta_json + pos, meta_json_cap - pos,
+              "%s\"%s\":\"%s\"", (pos > 1) ? "," : "",
+              ek ? ek : "", ev ? ev : "");
+          if (n > 0) pos += (size_t)n;
+          free(ek); free(ev);
+        }
+        snprintf(meta_json + pos, meta_json_cap - pos, "}");
+        meta_json_len = strlen(meta_json);
       }
+    }
 
-      size_t needed = strlen(hex_id) + meta_json_len + 200
-          + 6 * strlen(obj_cat) + 6 * strlen(obj_fn) + 6 * strlen(obj_ext);
+    size_t needed = strlen(hex_id) + meta_json_len + 200
+        + 6 * strlen(obj_cat) + 6 * strlen(obj_fn) + 6 * strlen(obj_ext);
 
-      while (json_len + needed >= json_cap) {
-          json_cap *= 2;
-          char *tmp = realloc(json, json_cap);
-          if (!tmp) {
-              for (size_t k = 0; k < count; k++) {
-                  free(objects[k]->data);
-                  if (objects[k]->acl) { free(objects[k]->acl->entries); free(objects[k]->acl); }
-                  free_metadata(objects[k]->metadata);
-                  free(objects[k]);
-              }
-              free(objects);
-              free(json);
-              free(ecat); free(efn); free(eext);
-              free(meta_json);
-              return MHD_NO;
-          }
-          json = tmp;
+    while (json_len + needed >= json_cap) {
+      json_cap *= 2;
+      char *tmp = realloc(json, json_cap);
+      if (!tmp) {
+        for (size_t k = 0; k < count; k++) {
+          free(objects[k]->data);
+          if (objects[k]->acl) { free(objects[k]->acl->entries); free(objects[k]->acl); }
+          free_metadata(objects[k]->metadata);
+          free(objects[k]);
+        }
+        free(objects);
+        free(json);
+        free(ecat); free(efn); free(eext);
+        free(meta_json);
+        return MHD_NO;
       }
+      json = tmp;
+    }
 
-      if (json_len >= json_cap)
-        goto loop_cleanup;
+    if (json_len >= json_cap)
+      goto loop_cleanup;
 
-      size_t remaining = json_cap - json_len;
+    size_t remaining = json_cap - json_len;
 
-      int res = snprintf(json + json_len, remaining, 
-                 "%s{\"id\":\"%s\",\"category\":\"%s\",\"filename\":\"%s\",\"extension\":\"%s\",\"size\":%zu,\"metadata\":%s}", 
-                 (i > 0) ? "," : "", hex_id,
-                 ecat, efn, eext,
-                 objects[i]->size,
-                 meta_json ? meta_json : "{}");
+    int res = snprintf(json + json_len, remaining,
+               "%s{\"id\":\"%s\",\"category\":\"%s\",\"filename\":\"%s\",\"extension\":\"%s\",\"size\":%zu,\"metadata\":%s}",
+               (i > 0) ? "," : "", hex_id,
+               ecat, efn, eext,
+               objects[i]->size,
+               meta_json ? meta_json : "{}");
 
-      free(meta_json);
-      meta_json = NULL;
+    free(meta_json);
+    meta_json = NULL;
 
-      if (res < 0 || (size_t)res >= remaining)
-        goto loop_cleanup;
+    if (res < 0 || (size_t)res >= remaining)
+      goto loop_cleanup;
 
-      json_len += (size_t)res;
+    json_len += (size_t)res;
 
 loop_cleanup:
-      free(meta_json);
-      free(ecat); free(efn); free(eext);
+    free(meta_json);
+    free(ecat); free(efn); free(eext);
   }
 
   if (json_len + 3 > json_cap) {
-      size_t new_cap = json_len + 3;
-      char *tmp = realloc(json, new_cap);
-      if (!tmp) {
-          for (size_t i = 0; i < count; i++) {
-              free(objects[i]->data);
-              if (objects[i]->acl) { free(objects[i]->acl->entries); free(objects[i]->acl); }
-              free_metadata(objects[i]->metadata);
-              free(objects[i]);
-          }
-          free(objects);
-          free(json);
-          return MHD_NO;
+    size_t new_cap = json_len + 3;
+    char *tmp = realloc(json, new_cap);
+    if (!tmp) {
+      for (size_t i = 0; i < count; i++) {
+        free(objects[i]->data);
+        if (objects[i]->acl) { free(objects[i]->acl->entries); free(objects[i]->acl); }
+        free_metadata(objects[i]->metadata);
+        free(objects[i]);
       }
-      json = tmp;
-      json_cap = new_cap;
+      free(objects);
+      free(json);
+      return MHD_NO;
+    }
+    json = tmp;
+    json_cap = new_cap;
   }
   memcpy(json + json_len, "]}", 3);
   json_len += 2;
 
   for (size_t i = 0; i < count; i++) {
-      free(objects[i]->data);
-      if (objects[i]->acl) { free(objects[i]->acl->entries); free(objects[i]->acl); }
-      free_metadata(objects[i]->metadata);
-      free(objects[i]);
+    free(objects[i]->data);
+    if (objects[i]->acl) { free(objects[i]->acl->entries); free(objects[i]->acl); }
+    free_metadata(objects[i]->metadata);
+    free(objects[i]);
   }
   free(objects);
 
   struct MHD_Response *resp = MHD_create_response_from_buffer(json_len, json, MHD_RESPMEM_MUST_FREE);
   if (!resp) {
-      free(json);
-      return MHD_NO;
+    free(json);
+    return MHD_NO;
   }
 
   MHD_add_response_header(resp, "Content-Type", "application/json");
