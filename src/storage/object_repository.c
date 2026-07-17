@@ -17,20 +17,22 @@
 #define PATH_MAX_LEN 4096
 #define MIN_CAPACITY 8
 
-static int resize_store(ObjectStore *store) {
+static int resize_store(ObjectStore* store)
+{
     size_t new_capacity = store->capacity * 2;
 
-    ObjectNode **new_buckets = calloc(new_capacity, sizeof(ObjectNode *));
-    if (!new_buckets) return 0;
+    ObjectNode** new_buckets = calloc(new_capacity, sizeof(ObjectNode*));
+    if (!new_buckets)
+        return 0;
 
     for (size_t i = 0; i < store->capacity; i++) {
-        ObjectNode *node = store->buckets[i];
+        ObjectNode* node = store->buckets[i];
 
         while (node) {
-            ObjectNode *next = node->next;
+            ObjectNode* next = node->next;
 
-            size_t new_index = hash_id(node->obj->id) % new_capacity;
-            node->next = new_buckets[new_index];
+            size_t new_index       = hash_id(node->obj->id) % new_capacity;
+            node->next             = new_buckets[new_index];
             new_buckets[new_index] = node;
 
             node = next;
@@ -38,31 +40,32 @@ static int resize_store(ObjectStore *store) {
     }
 
     free(store->buckets);
-    store->buckets = new_buckets;
+    store->buckets  = new_buckets;
     store->capacity = new_capacity;
 
     return 1;
 }
 
-static int write_index(ObjectStore *store) {
+static int write_index(ObjectStore* store)
+{
     char index_path[PATH_MAX_LEN + 16];
     char tmp_path[PATH_MAX_LEN + 32];
 
-    snprintf(index_path, sizeof(index_path),
-             "%s/__index", store->store_path);
-    snprintf(tmp_path, sizeof(tmp_path),
-             "%s/__index.tmp", store->store_path);
+    snprintf(index_path, sizeof(index_path), "%s/__index", store->store_path);
+    snprintf(tmp_path, sizeof(tmp_path), "%s/__index.tmp", store->store_path);
 
-    const FormatVtable *fmt = latest_format();
-    if (!fmt || !fmt->write_index) return 0;
+    const FormatVtable* fmt = latest_format();
+    if (!fmt || !fmt->write_index)
+        return 0;
 
-    unsigned char *ids = NULL;
+    unsigned char* ids = NULL;
     if (store->count > 0) {
         ids = malloc(store->count * 32);
-        if (!ids) return 0;
+        if (!ids)
+            return 0;
         size_t pos = 0;
         for (size_t i = 0; i < store->capacity; i++) {
-            ObjectNode *node = store->buckets[i];
+            ObjectNode* node = store->buckets[i];
             while (node) {
                 memcpy(ids + pos * 32, node->obj->id, 32);
                 pos++;
@@ -71,44 +74,61 @@ static int write_index(ObjectStore *store) {
         }
     }
 
-    FILE *f = fopen(tmp_path, "wb");
-    if (!f) { free(ids); return 0; }
+    FILE* f = fopen(tmp_path, "wb");
+    if (!f) {
+        free(ids);
+        return 0;
+    }
 
     if (!try_write_header(f, X2S_FILE_TYPE_INDEX)) {
-        fclose(f); remove(tmp_path); free(ids); return 0;
+        fclose(f);
+        remove(tmp_path);
+        free(ids);
+        return 0;
     }
 
     int ok = fmt->write_index(f, store->capacity, store->count, ids);
     fclose(f);
     free(ids);
 
-    if (!ok) { remove(tmp_path); return 0; }
+    if (!ok) {
+        remove(tmp_path);
+        return 0;
+    }
 
     if (rename(tmp_path, index_path) != 0) {
-        remove(tmp_path); return 0;
+        remove(tmp_path);
+        return 0;
     }
 
     return 1;
 }
 
-int load_index(ObjectStore *store) {
+int load_index(ObjectStore* store)
+{
     char index_path[PATH_MAX_LEN + 16];
-    snprintf(index_path, sizeof(index_path),
-             "%s/__index", store->store_path);
+    snprintf(index_path, sizeof(index_path), "%s/__index", store->store_path);
 
-    FILE *f = fopen(index_path, "rb");
-    if (!f) return 0;
+    FILE* f = fopen(index_path, "rb");
+    if (!f)
+        return 0;
 
     uint8_t version = 0;
-    int hret = try_read_header(f, X2S_FILE_TYPE_INDEX, &version);
-    if (hret == -1) { fclose(f); return -1; }
+    int     hret    = try_read_header(f, X2S_FILE_TYPE_INDEX, &version);
+    if (hret == -1) {
+        fclose(f);
+        return -1;
+    }
 
-    const FormatVtable *fmt = lookup_format(version);
-    if (!fmt || !fmt->read_index) { fclose(f); return 0; }
+    const FormatVtable* fmt = lookup_format(version);
+    if (!fmt || !fmt->read_index) {
+        fclose(f);
+        return 0;
+    }
 
-    size_t capacity = 0;
-    size_t count = 0;
-    unsigned char *ids = NULL;
+    size_t         capacity = 0;
+    size_t         count    = 0;
+    unsigned char* ids      = NULL;
 
     if (!fmt->read_index(f, &capacity, &count, &ids)) {
         fclose(f);
@@ -117,26 +137,32 @@ int load_index(ObjectStore *store) {
     fclose(f);
 
     if (capacity != store->capacity) {
-        ObjectNode **new_buckets = calloc(capacity, sizeof(ObjectNode *));
-        if (!new_buckets) { free(ids); return 0; }
+        ObjectNode** new_buckets = calloc(capacity, sizeof(ObjectNode*));
+        if (!new_buckets) {
+            free(ids);
+            return 0;
+        }
         free(store->buckets);
-        store->buckets = new_buckets;
+        store->buckets  = new_buckets;
         store->capacity = capacity;
     }
 
     store->count = 0;
 
     for (size_t i = 0; i < count; i++) {
-        unsigned char *id = ids + i * 32;
+        unsigned char* id = ids + i * 32;
 
-        Object *index_obj = calloc(1, sizeof(Object));
-        if (!index_obj) { free(ids); return 0; }
+        Object* index_obj = calloc(1, sizeof(Object));
+        if (!index_obj) {
+            free(ids);
+            return 0;
+        }
 
         Object temporary_load = {0};
         if (read_object_file(store, id, &temporary_load)) {
             memcpy(index_obj->id, id, 32);
             memcpy(index_obj->owner, temporary_load.owner, 16);
-            index_obj->acl = temporary_load.acl;
+            index_obj->acl  = temporary_load.acl;
             index_obj->size = temporary_load.size;
             free(temporary_load.data);
             free_metadata(temporary_load.metadata);
@@ -144,7 +170,7 @@ int load_index(ObjectStore *store) {
             memcpy(index_obj->id, id, 32);
         }
 
-        ObjectNode *node = malloc(sizeof(ObjectNode));
+        ObjectNode* node = malloc(sizeof(ObjectNode));
         if (!node) {
             if (index_obj->acl) {
                 free(index_obj->acl->entries);
@@ -155,9 +181,9 @@ int load_index(ObjectStore *store) {
             return 0;
         }
 
-        size_t idx = index_for(store, id);
-        node->obj = index_obj;
-        node->next = store->buckets[idx];
+        size_t idx          = index_for(store, id);
+        node->obj           = index_obj;
+        node->next          = store->buckets[idx];
         store->buckets[idx] = node;
         store->count++;
     }
@@ -166,14 +192,17 @@ int load_index(ObjectStore *store) {
     return 1;
 }
 
-ObjectStore *create_store(size_t initial_capacity, const char *path) {
-    if (!path) return NULL;
+ObjectStore* create_store(size_t initial_capacity, const char* path)
+{
+    if (!path)
+        return NULL;
 
-    ObjectStore *store = malloc(sizeof(ObjectStore));
-    if (!store) return NULL;
+    ObjectStore* store = malloc(sizeof(ObjectStore));
+    if (!store)
+        return NULL;
 
     store->capacity = (initial_capacity < MIN_CAPACITY) ? MIN_CAPACITY : initial_capacity;
-    store->count = 0;
+    store->count    = 0;
 
     snprintf(store->store_path, sizeof(store->store_path), "%s", path);
 
@@ -182,7 +211,7 @@ ObjectStore *create_store(size_t initial_capacity, const char *path) {
         return NULL;
     }
 
-    store->buckets = calloc(store->capacity, sizeof(ObjectNode *));
+    store->buckets = calloc(store->capacity, sizeof(ObjectNode*));
     if (!store->buckets) {
         free(store);
         return NULL;
@@ -199,14 +228,16 @@ ObjectStore *create_store(size_t initial_capacity, const char *path) {
     return store;
 }
 
-void free_store(ObjectStore *store) {
-    if (!store) return;
+void free_store(ObjectStore* store)
+{
+    if (!store)
+        return;
 
     for (size_t i = 0; i < store->capacity; i++) {
-        ObjectNode *node = store->buckets[i];
+        ObjectNode* node = store->buckets[i];
 
         while (node) {
-            ObjectNode *next = node->next;
+            ObjectNode* next = node->next;
             free(node->obj->data);
             if (node->obj->acl) {
                 free(node->obj->acl->entries);
@@ -223,15 +254,93 @@ void free_store(ObjectStore *store) {
     free(store);
 }
 
-int put_object(ObjectStore *store, User *user, Object *obj) {
-    if (!store || !obj || !user) return 0;
+static int handle_existing_dedup(Object* obj)
+{
+    if (obj->acl) {
+        free(obj->acl->entries);
+        free(obj->acl);
+        obj->acl = NULL;
+    }
+    free(obj->data);
+    obj->data = NULL;
+    return 1;
+}
 
-    if (!compute_object_id(user, obj, obj->id)) return 0;
+static ObjectNode* create_index_entry(Object* obj)
+{
+    Object* index_obj = calloc(1, sizeof(Object));
+    if (!index_obj)
+        return NULL;
+
+    memcpy(index_obj->id, obj->id, 32);
+    index_obj->size = obj->size;
+    index_obj->data = NULL;
+
+    if (obj->metadata) {
+        index_obj->metadata = calloc(1, sizeof(Metadata));
+        if (index_obj->metadata) {
+            index_obj->metadata->category =
+                obj->metadata->category ? strdup(obj->metadata->category) : NULL;
+            index_obj->metadata->extension =
+                obj->metadata->extension ? strdup(obj->metadata->extension) : NULL;
+            index_obj->metadata->filename =
+                obj->metadata->filename ? strdup(obj->metadata->filename) : NULL;
+            index_obj->metadata->metadata_count = 0;
+            if (obj->metadata->metadata_count > 0) {
+                index_obj->metadata->metadata_keys =
+                    calloc(obj->metadata->metadata_count, sizeof(char*));
+                index_obj->metadata->metadata_values =
+                    calloc(obj->metadata->metadata_count, sizeof(char*));
+                if (index_obj->metadata->metadata_keys && index_obj->metadata->metadata_values) {
+                    for (size_t i = 0; i < obj->metadata->metadata_count; i++) {
+                        index_obj->metadata->metadata_keys[i] =
+                            obj->metadata->metadata_keys[i] ?
+                                strdup(obj->metadata->metadata_keys[i]) :
+                                NULL;
+                        index_obj->metadata->metadata_values[i] =
+                            obj->metadata->metadata_values[i] ?
+                                strdup(obj->metadata->metadata_values[i]) :
+                                NULL;
+                    }
+                    index_obj->metadata->metadata_count = obj->metadata->metadata_count;
+                } else {
+                    free(index_obj->metadata->metadata_keys);
+                    free(index_obj->metadata->metadata_values);
+                    index_obj->metadata->metadata_keys   = NULL;
+                    index_obj->metadata->metadata_values = NULL;
+                }
+            }
+        }
+    }
+
+    memcpy(index_obj->owner, obj->owner, 16);
+    index_obj->acl = obj->acl;
+
+    ObjectNode* node = malloc(sizeof(ObjectNode));
+    if (!node) {
+        free_metadata(index_obj->metadata);
+        free(index_obj);
+        return NULL;
+    }
+
+    node->obj = index_obj;
+    node->next = NULL;
+    return node;
+}
+
+int put_object(ObjectStore* store, User* user, Object* obj)
+{
+    if (!store || !obj || !user)
+        return 0;
+
+    if (!compute_object_id(user, obj, obj->id))
+        return 0;
 
     memcpy(obj->owner, user->user_id, 16);
 
     obj->acl = calloc(1, sizeof(ACL));
-    if (!obj->acl) return 0;
+    if (!obj->acl)
+        return 0;
 
     obj->acl->entries = malloc(sizeof(ACLEntry));
     if (!obj->acl->entries) {
@@ -244,83 +353,30 @@ int put_object(ObjectStore *store, User *user, Object *obj) {
     memcpy(obj->acl->entries[0].user_id, user->user_id, 16);
     obj->acl->entries[0].permissions = PERM_READ | PERM_WRITE | PERM_DELETE;
 
-    size_t index = index_for(store, obj->id);
-    ObjectNode *existing = store->buckets[index];
+    size_t      index    = index_for(store, obj->id);
+    ObjectNode* existing = store->buckets[index];
     while (existing) {
-        if (memcmp(existing->obj->id, obj->id, 32) == 0) {
-            if (obj->acl) {
-                free(obj->acl->entries);
-                free(obj->acl);
-                obj->acl = NULL;
-            }
-            if (obj->data) {
-                free(obj->data);
-                obj->data = NULL;
-            }
-            if (obj->metadata) {
-                free_metadata(obj->metadata);
-                obj->metadata = NULL;
-            }
-            return 1;
-        }
+        if (memcmp(existing->obj->id, obj->id, 32) == 0)
+            return handle_existing_dedup(obj);
         existing = existing->next;
     }
 
-    if (!write_object_file(store, obj)) goto cleanup;
+    if (!write_object_file(store, obj))
+        goto cleanup;
 
     if ((double)store->count / store->capacity > LOAD_FACTOR_THRESHOLD) {
-        if (!resize_store(store)) goto cleanup;
-        if (!write_index(store)) goto cleanup;
+        if (!resize_store(store))
+            goto cleanup;
+        if (!write_index(store))
+            goto cleanup;
         index = index_for(store, obj->id);
     }
 
-    Object *index_obj = calloc(1, sizeof(Object));
-    if (!index_obj) goto cleanup;
-
-    memcpy(index_obj->id, obj->id, 32);
-    index_obj->size = obj->size;
-    index_obj->data = NULL;
-    if (obj->metadata) {
-        index_obj->metadata = calloc(1, sizeof(Metadata));
-        if (index_obj->metadata) {
-            index_obj->metadata->category = obj->metadata->category ? strdup(obj->metadata->category) : NULL;
-            index_obj->metadata->extension = obj->metadata->extension ? strdup(obj->metadata->extension) : NULL;
-            index_obj->metadata->filename = obj->metadata->filename ? strdup(obj->metadata->filename) : NULL;
-            index_obj->metadata->metadata_count = 0;
-            if (obj->metadata->metadata_count > 0) {
-                index_obj->metadata->metadata_keys   = calloc(obj->metadata->metadata_count, sizeof(char *));
-                index_obj->metadata->metadata_values = calloc(obj->metadata->metadata_count, sizeof(char *));
-                if (index_obj->metadata->metadata_keys && index_obj->metadata->metadata_values) {
-                    for (size_t i = 0; i < obj->metadata->metadata_count; i++) {
-                        index_obj->metadata->metadata_keys[i]   = obj->metadata->metadata_keys[i]
-                            ? strdup(obj->metadata->metadata_keys[i])   : NULL;
-                        index_obj->metadata->metadata_values[i] = obj->metadata->metadata_values[i]
-                            ? strdup(obj->metadata->metadata_values[i]) : NULL;
-                    }
-                    index_obj->metadata->metadata_count = obj->metadata->metadata_count;
-                } else {
-                    free(index_obj->metadata->metadata_keys);
-                    free(index_obj->metadata->metadata_values);
-                    index_obj->metadata->metadata_keys   = NULL;
-                    index_obj->metadata->metadata_values = NULL;
-                }
-            }
-        }
-    } else {
-        index_obj->metadata = NULL;
-    }
-
-    memcpy(index_obj->owner, obj->owner, 16);
-    index_obj->acl = obj->acl;
-
-    ObjectNode *node = malloc(sizeof(ObjectNode));
-    if (!node) {
-        free(index_obj);
+    ObjectNode* node = create_index_entry(obj);
+    if (!node)
         goto cleanup;
-    }
 
-    node->obj = index_obj;
-    node->next = store->buckets[index];
+    node->next            = store->buckets[index];
     store->buckets[index] = node;
 
     store->count++;
@@ -328,9 +384,9 @@ int put_object(ObjectStore *store, User *user, Object *obj) {
     if (!write_index(store)) {
         store->buckets[index] = node->next;
         store->count--;
-        obj->acl = NULL;
         free(node->obj->acl->entries);
         free(node->obj->acl);
+        obj->acl = NULL;
         free(node->obj);
         free(node);
         return 0;
@@ -345,16 +401,19 @@ cleanup:
     return 0;
 }
 
-Object *get_object(ObjectStore *store, User *user, const unsigned char id[32]) {
-    if (!store || !id) return NULL;
+Object* get_object(ObjectStore* store, User* user, const unsigned char id[32])
+{
+    if (!store || !id)
+        return NULL;
 
-    size_t index = index_for(store, id);
-    ObjectNode *node = store->buckets[index];
+    size_t      index = index_for(store, id);
+    ObjectNode* node  = store->buckets[index];
 
     while (node) {
         if (memcmp(node->obj->id, id, 32) == 0) {
-            Object *obj = malloc(sizeof(Object));
-            if (!obj) return NULL;
+            Object* obj = malloc(sizeof(Object));
+            if (!obj)
+                return NULL;
 
             if (!read_object_file(store, id, obj)) {
                 free(obj);
@@ -380,12 +439,14 @@ Object *get_object(ObjectStore *store, User *user, const unsigned char id[32]) {
     return NULL;
 }
 
-int check_object_permission(ObjectStore *store, const unsigned char id[32],
-                            unsigned char user_id[16], uint32_t perm) {
-    if (!store || !id) return -1;
+int check_object_permission(ObjectStore* store, const unsigned char id[32],
+                            unsigned char user_id[16], uint32_t perm)
+{
+    if (!store || !id)
+        return -1;
 
-    size_t index = index_for(store, id);
-    ObjectNode *node = store->buckets[index];
+    size_t      index = index_for(store, id);
+    ObjectNode* node  = store->buckets[index];
 
     while (node) {
         if (memcmp(node->obj->id, id, 32) == 0)
@@ -396,13 +457,15 @@ int check_object_permission(ObjectStore *store, const unsigned char id[32],
     return -1;
 }
 
-int remove_object(ObjectStore *store, User *user, const unsigned char id[32]) {
-    if (!store || !id || !user) return 0;
+int remove_object(ObjectStore* store, User* user, const unsigned char id[32])
+{
+    if (!store || !id || !user)
+        return 0;
 
     size_t index = index_for(store, id);
 
-    ObjectNode *node = store->buckets[index];
-    ObjectNode *prev = NULL;
+    ObjectNode* node = store->buckets[index];
+    ObjectNode* prev = NULL;
 
     while (node) {
         if (memcmp(node->obj->id, id, 32) == 0) {
@@ -411,25 +474,27 @@ int remove_object(ObjectStore *store, User *user, const unsigned char id[32]) {
             }
 
             unsigned char data_hash[32];
-            int hash_read_success = 0;
-            char path[PATH_MAX_LEN + 128];
+            int           hash_read_success = 0;
+            char          path[PATH_MAX_LEN + 128];
             object_path(store, id, path, sizeof(path));
 
-            FILE *f = fopen(path, "rb");
+            FILE* f = fopen(path, "rb");
             if (f) {
                 uint8_t version = 0;
-                int hret = try_read_header(f, X2S_FILE_TYPE_METADATA, &version);
-                if (hret == -1) { fclose(f); goto skip_data_blob; }
+                int     hret    = try_read_header(f, X2S_FILE_TYPE_METADATA, &version);
+                if (hret == -1) {
+                    fclose(f);
+                    goto skip_data_blob;
+                }
 
-                const FormatVtable *fmt = lookup_format(version);
-                if (fmt && fmt->read_data_hash &&
-                    fmt->read_data_hash(f, data_hash)) {
+                const FormatVtable* fmt = lookup_format(version);
+                if (fmt && fmt->read_data_hash && fmt->read_data_hash(f, data_hash)) {
                     hash_read_success = 1;
                 }
                 fclose(f);
             }
 
-skip_data_blob:
+        skip_data_blob:
             if (prev) {
                 prev->next = node->next;
             } else {
@@ -467,12 +532,14 @@ skip_data_blob:
     return 0;
 }
 
-int share_object(ObjectStore *store, User *requester, const unsigned char id[32],
-                 unsigned char target_user_id[16], uint32_t permissions) {
-    if (!store || !requester || !id) return 0;
+int share_object(ObjectStore* store, User* requester, const unsigned char id[32],
+                 unsigned char target_user_id[16], uint32_t permissions)
+{
+    if (!store || !requester || !id)
+        return 0;
 
-    size_t index = index_for(store, id);
-    ObjectNode *node = store->buckets[index];
+    size_t      index = index_for(store, id);
+    ObjectNode* node  = store->buckets[index];
 
     while (node) {
         if (memcmp(node->obj->id, id, 32) == 0) {
@@ -490,7 +557,7 @@ int share_object(ObjectStore *store, User *requester, const unsigned char id[32]
                 for (size_t i = 0; i < full_obj.acl->count; i++) {
                     if (memcmp(full_obj.acl->entries[i].user_id, target_user_id, 16) == 0) {
                         full_obj.acl->entries[i].permissions = permissions;
-                        found = 1;
+                        found                                = 1;
                         break;
                     }
                 }
@@ -500,11 +567,14 @@ int share_object(ObjectStore *store, User *requester, const unsigned char id[32]
                 size_t old_count = full_obj.acl ? full_obj.acl->count : 0;
                 size_t new_count = old_count + 1;
 
-                ACLEntry *new_entries = realloc(full_obj.acl ? full_obj.acl->entries : NULL,
+                ACLEntry* new_entries = realloc(full_obj.acl ? full_obj.acl->entries : NULL,
                                                 new_count * sizeof(ACLEntry));
                 if (!new_entries) {
                     free(full_obj.data);
-                    if (full_obj.acl) { free(full_obj.acl->entries); free(full_obj.acl); }
+                    if (full_obj.acl) {
+                        free(full_obj.acl->entries);
+                        free(full_obj.acl);
+                    }
                     free_metadata(full_obj.metadata);
                     return 0;
                 }
@@ -520,7 +590,7 @@ int share_object(ObjectStore *store, User *requester, const unsigned char id[32]
                 }
 
                 full_obj.acl->entries = new_entries;
-                full_obj.acl->count = new_count;
+                full_obj.acl->count   = new_count;
 
                 memcpy(full_obj.acl->entries[old_count].user_id, target_user_id, 16);
                 full_obj.acl->entries[old_count].permissions = permissions;
@@ -551,103 +621,126 @@ int share_object(ObjectStore *store, User *requester, const unsigned char id[32]
     return -1;
 }
 
-int list_user_objects(ObjectStore *store, User *user,
-                      const char *filter_category, const char *filter_filename,
-                      const char *filter_extension,
-                      const char *filter_metadata_key, const char *filter_metadata_value,
-                      Object ***out_objects, size_t *out_count) {
-    if (!store || !user || !out_objects || !out_count) return 0;
+static int object_matches_filters(Object* obj, const char* filter_category,
+                                   const char* filter_filename, const char* filter_extension,
+                                   const char* filter_metadata_key,
+                                   const char* filter_metadata_value)
+{
+    if (filter_category && strlen(filter_category) > 0) {
+        if (!obj->metadata || !obj->metadata->category ||
+            strcmp(obj->metadata->category, filter_category) != 0)
+            return 0;
+    }
 
-    size_t capacity = 16;
-    size_t count = 0;
-    Object **list = malloc(capacity * sizeof(Object *));
-    if (!list) return 0;
+    if (filter_filename && strlen(filter_filename) > 0) {
+        if (!obj->metadata || !obj->metadata->filename ||
+            strcmp(obj->metadata->filename, filter_filename) != 0)
+            return 0;
+    }
 
-    for (size_t i = 0; i < store->capacity; i++) {
-        ObjectNode *node = store->buckets[i];
-        while (node) {
-            if (has_permission(node->obj, user->user_id, PERM_READ)) {
-                Object *full_obj = malloc(sizeof(Object));
-                if (full_obj) {
-                    if (read_object_file(store, node->obj->id, full_obj)) {
-                        int matches = 1;
+    if (filter_extension && strlen(filter_extension) > 0) {
+        if (!obj->metadata || !obj->metadata->extension ||
+            strcmp(obj->metadata->extension, filter_extension) != 0)
+            return 0;
+    }
 
-                        if (filter_category && strlen(filter_category) > 0) {
-                            if (!full_obj->metadata || !full_obj->metadata->category ||
-                                strcmp(full_obj->metadata->category, filter_category) != 0) {
-                                matches = 0;
-                            }
-                        }
-
-                        if (filter_filename && strlen(filter_filename) > 0) {
-                            if (!full_obj->metadata || !full_obj->metadata->filename ||
-                                strcmp(full_obj->metadata->filename, filter_filename) != 0) {
-                                matches = 0;
-                            }
-                        }
-
-                        if (filter_extension && strlen(filter_extension) > 0) {
-                            if (!full_obj->metadata || !full_obj->metadata->extension ||
-                                strcmp(full_obj->metadata->extension, filter_extension) != 0) {
-                                matches = 0;
-                            }
-                        }
-
-                        if (matches && filter_metadata_key && strlen(filter_metadata_key) > 0) {
-                            int found = 0;
-                            if (full_obj->metadata && full_obj->metadata->metadata_count > 0) {
-                                for (size_t m = 0; m < full_obj->metadata->metadata_count; m++) {
-                                    if (full_obj->metadata->metadata_keys[m] &&
-                                        full_obj->metadata->metadata_values[m] &&
-                                        strcmp(full_obj->metadata->metadata_keys[m], filter_metadata_key) == 0) {
-                                        if (!filter_metadata_value || strlen(filter_metadata_value) == 0 ||
-                                            strcmp(full_obj->metadata->metadata_values[m], filter_metadata_value) == 0) {
-                                            found = 1;
-                                            break;
-                                        }
-                                    }
-                                }
-                            }
-                            if (!found) matches = 0;
-                        }
-
-                        if (matches) {
-                            if (count >= capacity) {
-                                capacity *= 2;
-                                Object **tmp = realloc(list, capacity * sizeof(Object *));
-                                if (!tmp) {
-                                    for (size_t j = 0; j < count; j++) {
-                                        free(list[j]->data);
-                                        if (list[j]->acl) { free(list[j]->acl->entries); free(list[j]->acl); }
-                                        free_metadata(list[j]->metadata);
-                                        free(list[j]);
-                                    }
-                                    free(list);
-                                    free(full_obj->data);
-                                    if (full_obj->acl) { free(full_obj->acl->entries); free(full_obj->acl); }
-                                    free_metadata(full_obj->metadata);
-                                    free(full_obj);
-                                    return 0;
-                                }
-                                list = tmp;
-                            }
-                            list[count++] = full_obj;
-                        } else {
-                            free(full_obj->data);
-                            if (full_obj->acl) { free(full_obj->acl->entries); free(full_obj->acl); }
-                            free_metadata(full_obj->metadata);
-                            free(full_obj);
-                        }
-                    } else {
-                        free(full_obj);
+    if (filter_metadata_key && strlen(filter_metadata_key) > 0) {
+        int found = 0;
+        if (obj->metadata && obj->metadata->metadata_count > 0) {
+            for (size_t m = 0; m < obj->metadata->metadata_count; m++) {
+                if (obj->metadata->metadata_keys[m] && obj->metadata->metadata_values[m] &&
+                    strcmp(obj->metadata->metadata_keys[m], filter_metadata_key) == 0) {
+                    if (!filter_metadata_value || strlen(filter_metadata_value) == 0 ||
+                        strcmp(obj->metadata->metadata_values[m], filter_metadata_value) == 0) {
+                        found = 1;
+                        break;
                     }
                 }
+            }
+        }
+        if (!found)
+            return 0;
+    }
+
+    return 1;
+}
+
+int list_user_objects(ObjectStore* store, User* user, const char* filter_category,
+                      const char* filter_filename, const char* filter_extension,
+                      const char* filter_metadata_key, const char* filter_metadata_value,
+                      Object*** out_objects, size_t* out_count)
+{
+    if (!store || !user || !out_objects || !out_count)
+        return 0;
+
+    size_t   capacity = 16;
+    size_t   count    = 0;
+    Object** list     = malloc(capacity * sizeof(Object*));
+    if (!list)
+        return 0;
+
+    for (size_t i = 0; i < store->capacity; i++) {
+        ObjectNode* node = store->buckets[i];
+        while (node) {
+            if (has_permission(node->obj, user->user_id, PERM_READ)) {
+                Object* full_obj = malloc(sizeof(Object));
+                if (!full_obj) {
+                    node = node->next;
+                    continue;
+                }
+
+                if (!read_object_file(store, node->obj->id, full_obj)) {
+                    free(full_obj);
+                    node = node->next;
+                    continue;
+                }
+
+                if (!object_matches_filters(full_obj, filter_category, filter_filename,
+                                            filter_extension, filter_metadata_key,
+                                            filter_metadata_value)) {
+                    free(full_obj->data);
+                    if (full_obj->acl) {
+                        free(full_obj->acl->entries);
+                        free(full_obj->acl);
+                    }
+                    free_metadata(full_obj->metadata);
+                    free(full_obj);
+                    node = node->next;
+                    continue;
+                }
+
+                if (count >= capacity) {
+                    capacity *= 2;
+                    Object** tmp = realloc(list, capacity * sizeof(Object*));
+                    if (!tmp) {
+                        for (size_t j = 0; j < count; j++) {
+                            free(list[j]->data);
+                            if (list[j]->acl) {
+                                free(list[j]->acl->entries);
+                                free(list[j]->acl);
+                            }
+                            free_metadata(list[j]->metadata);
+                            free(list[j]);
+                        }
+                        free(list);
+                        free(full_obj->data);
+                        if (full_obj->acl) {
+                            free(full_obj->acl->entries);
+                            free(full_obj->acl);
+                        }
+                        free_metadata(full_obj->metadata);
+                        free(full_obj);
+                        return 0;
+                    }
+                    list = tmp;
+                }
+                list[count++] = full_obj;
             }
             node = node->next;
         }
     }
 
     *out_objects = list;
-    *out_count = count;
+    *out_count   = count;
     return 1;
 }

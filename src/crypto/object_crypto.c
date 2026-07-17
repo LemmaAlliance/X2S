@@ -3,14 +3,18 @@
 #include "core/object_types.h"
 #include "crypto/object_crypto.h"
 
-static int digest_update_str(EVP_MD_CTX *ctx, const char *s) {
-    if (!s) return 1;
+static int digest_update_str(EVP_MD_CTX* ctx, const char* s)
+{
+    if (!s)
+        return 1;
     return EVP_DigestUpdate(ctx, s, strlen(s));
 }
 
-int compute_object_id(User *user, Object *obj, unsigned char out[32]) {
-    EVP_MD_CTX *ctx = EVP_MD_CTX_new();
-    if (!ctx) return 0;
+int compute_object_id(User* user, Object* obj, unsigned char out[32])
+{
+    EVP_MD_CTX* ctx = EVP_MD_CTX_new();
+    if (!ctx)
+        return 0;
 
     if (!EVP_DigestInit_ex(ctx, EVP_sha256(), NULL)) {
         EVP_MD_CTX_free(ctx);
@@ -57,9 +61,11 @@ int compute_object_id(User *user, Object *obj, unsigned char out[32]) {
     return 1;
 }
 
-int compute_data_hash(const unsigned char *data, size_t size, unsigned char out[32]) {
-    EVP_MD_CTX *ctx = EVP_MD_CTX_new();
-    if (!ctx) return 0;
+int compute_data_hash(const unsigned char* data, size_t size, unsigned char out[32])
+{
+    EVP_MD_CTX* ctx = EVP_MD_CTX_new();
+    if (!ctx)
+        return 0;
 
     if (!EVP_DigestInit_ex(ctx, EVP_sha256(), NULL)) {
         EVP_MD_CTX_free(ctx);

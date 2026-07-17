@@ -4,11 +4,14 @@
 #include "core/format.h"
 #include "storage/object_serialization.h"
 
-char *read_string_field(FILE *f, size_t len) {
-    if (len == 0) return NULL;
+char* read_string_field(FILE* f, size_t len)
+{
+    if (len == 0)
+        return NULL;
 
-    char *buf = malloc(len + 1);
-    if (!buf) return NULL;
+    char* buf = malloc(len + 1);
+    if (!buf)
+        return NULL;
 
     if (fread(buf, 1, len, f) != len) {
         free(buf);
@@ -19,9 +22,10 @@ char *read_string_field(FILE *f, size_t len) {
     return buf;
 }
 
-int try_read_header(FILE *f, uint8_t expected_type, uint8_t *out_version) {
-    x2s_file_header_t hdr;
-    long start = ftell(f);
+int try_read_header(FILE* f, uint8_t expected_type, uint8_t* out_version)
+{
+    X2sFileHeader hdr;
+    long              start = ftell(f);
 
     if (fread(&hdr, sizeof(hdr), 1, f) != 1) {
         clearerr(f);
@@ -42,6 +46,7 @@ int try_read_header(FILE *f, uint8_t expected_type, uint8_t *out_version) {
     return 0;
 }
 
-int try_write_header(FILE *f, uint8_t file_type) {
+int try_write_header(FILE* f, uint8_t file_type)
+{
     return write_header(f, file_type, X2S_FORMAT_VERSION_1);
 }

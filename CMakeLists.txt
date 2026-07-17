@@ -52,6 +52,7 @@ pkg_check_modules(MHD REQUIRED libmicrohttpd)
 
 add_executable(x2s
     src/cli/main.c
+    src/core/hex_utils.c
     src/server/api_server.c
     src/auth/auth.c
     src/config/cli_setup.c
@@ -80,6 +81,7 @@ target_link_libraries(x2s PRIVATE
 
 add_executable(x2s-migrate
     src/cli/migrate.c
+    src/core/hex_utils.c
     src/auth/auth.c
     src/format/format_v1.c
     src/storage/object_io.c

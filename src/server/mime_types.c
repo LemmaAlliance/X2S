@@ -1,13 +1,15 @@
 #include <string.h>
 #include <strings.h>
 
-const char *mime_for_extension(const char *ext) {
+const char* mime_for_extension(const char* ext)
+{
     if (!ext)
         return "application/octet-stream";
 
-    const struct {
-        const char *ext;
-        const char *mime;
+    const struct
+    {
+        const char* ext;
+        const char* mime;
     } table[] = {{"txt", "text/plain"},
                  {"html", "text/html"},
                  {"htm", "text/html"},
