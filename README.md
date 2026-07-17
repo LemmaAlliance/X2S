@@ -1,14 +1,12 @@
 # X2S — eXtremely Simple Storage
 
-A lightweight, RESTful blob storage server written in C11. Upload and retrieve binary objects identified by their SHA-256 content hash, with per-object ACLs and user authentication.
+A lightweight, RESTful blob storage server written in C11. Upload and retrieve binary objects identified by their SHA-256 content hash, with per-object ACLs, user authentication, and optional AES-256-GCM encryption at rest.
 
 ## Quick start
-```bash
-# update package repos
-sudo apt update
 
+```bash
 # install dependencies (Debian/Ubuntu)
-sudo apt install build-essential cmake libmicrohttpd-dev libssl-dev
+sudo apt update && sudo apt install build-essential cmake libmicrohttpd-dev libssl-dev
 
 # build
 cmake -S . -B build && cmake --build build
@@ -18,16 +16,17 @@ cmake -S . -B build && cmake --build build
 
 # or with a config file
 ./build/x2s --config config.example.json
-
 ```
 
-```
+On startup the server prints:
 
+```
 Welcome to X2S — eXtremely Simple Storage
 Listening on http://0.0.0.0:8080
 Allowed CORS Origin: *
 Data directory: ./x2s_data
 Temporary directory: /tmp/x2s
+Encryption at rest: disabled
   POST  /auth/register      register a new user
   POST  /auth/login          authenticate and get a token
   POST  /auth/logout         invalidate a token
@@ -37,7 +36,6 @@ Temporary directory: /tmp/x2s
   DELETE /objects/<id>       remove an object
   POST  /objects/<id>/share  share an object with another user
 Press Ctrl-C to stop.
-
 ```
 
 ## API
@@ -60,7 +58,6 @@ curl -X POST http://localhost:8080/auth/login \
 # logout
 curl -X POST http://localhost:8080/auth/logout \
   -H 'Authorization: Bearer <token>'
-
 ```
 
 Passwords are hashed with **PBKDF2-HMAC-SHA256** (400,000 iterations, random 16-byte salt, max 1024 bytes). The server stores only the salted hash — never the plaintext password. Password hashes and session tokens are compared using **constant-time** (`CRYPTO_memcmp`) to prevent timing side-channel attacks.
@@ -106,7 +103,6 @@ curl -X POST http://localhost:8080/objects/63a46a45f4bcc89a04adfefccdfdbb5b66a65
 # delete
 curl -X DELETE -H 'Authorization: Bearer <token>' \
   http://localhost:8080/objects/63a46a45f4bcc89a04adfefccdfdbb5b66a659d92cb54dd2bdb4e1705d06996a
-
 ```
 
 #### Listing & Filtering (`GET /objects`)
@@ -156,7 +152,6 @@ All errors return JSON:
 
 ```json
 {"error":"<message>"}
-
 ```
 
 | Status | Meaning |
@@ -170,7 +165,6 @@ All errors return JSON:
 | 404 | Object not found |
 | 405 | Method not allowed |
 | 409 | Username taken |
-| 413 | Body exceeds 64 MiB limit |
 | 500 | Internal server error |
 
 ## Storage
@@ -182,6 +176,52 @@ All persistent storage files live in `./x2s_data/` and adhere to a split model l
 * **In-memory index**: A chained hash table (FNV-1a) maps object tracking IDs to lightweight entries. Resizes when load factor exceeds 0.75. Persisted atomically (temp file + rename) to `./x2s_data/__index`. Modifying object ACLs rewrites the associated object metadata file and updates this volatile cache.
 * **User accounts**: Stored as binary at `./x2s_data/__users`. Survive server restarts. Sessions are ephemeral and lost on restart (re-login required).
 * **Atomic writes**: Both the object index and user database use a write-then-rename strategy to prevent corruption on crash.
+* **Encryption at rest**: When a master key is configured, all on-disk files are transparently encrypted with AES-256-GCM (format version 2). See [Encryption at rest](#encryption-at-rest).
+
+## Encryption at rest
+
+X2S supports transparent **AES-256-GCM** encryption for all data on disk. When enabled:
+
+* Metadata files, the user database, the object index, and data blobs are all encrypted with AES-256-GCM.
+* Each file uses a unique 12-byte random nonce (generated per write).
+* A 16-byte GCM authentication tag ensures integrity — tampered or corrupted files are detected on read.
+* Encryption is transparent to the API layer; encrypt/decrypt happens during file I/O.
+
+### Enabling encryption
+
+Provide a 64-character hex-encoded 256-bit master key via the config file or the `X2S_MASTER_KEY` environment variable:
+
+```json
+{
+  "port": 8080,
+  "cors_origin": "*",
+  "data_directory": "./x2s_data",
+  "temporary_directory": "/tmp/x2s",
+  "master_key": "abcdef0123456789abcdef0123456789abcdef0123456789abcdef0123456789"
+}
+```
+
+Or set the environment variable:
+
+```bash
+export X2S_MASTER_KEY="abcdef0123456789abcdef0123456789abcdef0123456789abcdef0123456789"
+```
+
+The server logs `Encryption at rest: enabled` on startup when a valid key is provided.
+
+### Converting existing data
+
+If you have a plaintext (version 1) data directory and want to enable encryption (or vice versa), run the migration tool with the appropriate config or environment variable:
+
+```bash
+# encrypt existing data
+X2S_MASTER_KEY="<64-hex>" ./build/x2s-migrate ./x2s_data
+
+# decrypt existing data (run without a key)
+./build/x2s-migrate ./x2s_data
+```
+
+The migration tool converts every file, preserving backups as `.bak`. It is idempotent — files already at the target format are skipped.
 
 ## Build
 
@@ -189,21 +229,23 @@ All persistent storage files live in `./x2s_data/` and adhere to a split model l
 
 * **CMake** ≥ 3.15
 * **libmicrohttpd** (embedded HTTP server)
-* **OpenSSL** `libcrypto` (SHA-256, PBKDF2, random bytes, constant-time comparison)
+* **OpenSSL** `libcrypto` (SHA-256, PBKDF2, AES-256-GCM, random bytes, constant-time comparison)
 * A C11 compiler (GCC, Clang)
 
 ### Compile
 
 ```bash
 cmake -S . -B build && cmake --build build
-
 ```
+
+Produces two binaries:
+* `build/x2s` -- the main server
+* `build/x2s-migrate` -- standalone data format migration tool
 
 ### Usage
 
 ```bash
 ./build/x2s [--config path] [--help]
-
 ```
 
 ### Configuration
@@ -212,7 +254,6 @@ X2S can be configured via a JSON config file using the `--config` flag:
 
 ```bash
 ./build/x2s --config config.example.json
-
 ```
 
 | Field | Default | Description |
@@ -221,51 +262,58 @@ X2S can be configured via a JSON config file using the `--config` flag:
 | `cors_origin` | `*` | Allowed CORS origin |
 | `data_directory` | `./x2s_data` | Persistent storage directory |
 | `temporary_directory` | `/tmp/x2s` | Temporary upload directory |
+| `master_key` | `""` | 64-hex-char 256-bit key for AES-256-GCM encryption at rest |
 
-See `config.example.json` for a full example. All fields are optional.
+See `config.example.json` for a full example. All fields are optional. The master key can also be set via the `X2S_MASTER_KEY` environment variable.
 
 ## Design notes
 
-* **Single-threaded** — libmicrohttpd internal polling thread handles all I/O. No locking, no concurrent access safety.
-* **No TLS** — intended for trusted/internal networks. **It is highly recommended to pair this with a reverse proxy like Nginx**
+* **Single-threaded** — libmicrohttpd's internal polling thread handles all I/O. No locking, no concurrent access safety.
+* **No TLS** — intended for trusted/internal networks. **It is highly recommended to pair this with a reverse proxy like Nginx**.
 * **Content-addressed & Deduplicated** — payload contents are identified via unique data hashes. Multiple metadata targets reference identical chunks on disk, achieving file deduplication across users while preserving access control sandboxing.
 * **Metadata query discovery** — indexes user spaces globally in real-time by crawling local hash-node buckets to enforce precise sandbox filtering constraints quickly.
 * **Constant-time comparisons** — password hashes and session tokens are compared with `CRYPTO_memcmp` to mitigate timing attacks.
-* **Poor session expiry** — At the moment, token expiry is handled however it won't be good on large scales as it runs in about O(n) I would consider it to be secure though, but you should review yourself. Expired tokens are checked for evey 100ms with a linear search but I want to move to a linked list or something.
+* **Encryption at rest** — optional AES-256-GCM transparent encryption of all on-disk data via a configurable master key.
+* **Token expiry** — sessions expire after 30 minutes of inactivity. Expired tokens are checked every 100ms via a linear scan (O(n); a linked list or timer wheel is planned for the future).
 * **Maximum password length** — 1024 bytes.
-* **Maximum object size** — 64 MiB (hardcoded as `MAX_UPLOAD_SIZE` in `api_server.c`).
+* **Maximum object size** — no hard limit; uploads are streamed directly to a temporary file on disk, then loaded into memory for storage. Practical limit is available RAM.
 * **No rate limiting** — `/auth/login` accepts unlimited requests; pair with external rate limiting for brute-force protection. (This is a future feature)
 
-For now, use a reverse proxy to rate limit and add TLS
+For now, use a reverse proxy to rate limit and add TLS.
 
 ## Storage format & migration
 
-All on-disk files (`__users`, `__index`, and per-object metadata files) use a 4-byte header:
+All on-disk files (`__users`, `__index`, per-object metadata files, and data blobs) use a 4-byte header:
 
 ```
 offset  size  field
 ------  ----  ---------------------
      0     2  magic bytes: 'X' '2'
-     2     1  file type: 1=metadata, 2=index, 3=users
-     3     1  format version (currently 1)
+     2     1  file type: 1=metadata, 2=index, 3=users, 4=data blob
+     3     1  format version
 ```
 
-The version number allows future format changes. If the server encounters a file with an unrecognized version, it refuses to start and prints an upgrade hint.
+| Version | Description |
+| --- | --- |
+| 1 | Plaintext (no encryption) |
+| 2 | AES-256-GCM encrypted |
+
+If the server encounters a file with an unrecognized version, it refuses to start and prints an upgrade hint.
 
 ### Migrating existing data
 
-If you have a data directory from an older X2S version (before the format header was introduced), run:
+If you have a data directory from an older X2S version (before the format header was introduced), or you want to enable/disable encryption, run:
 
 ```bash
-./build/x2s-migrate ./x2s_data
+./build/x2s-migrate [<data_directory>]
 ```
 
-This scans the directory, upgrades each legacy file by adding the header, and saves the original as a `.bak` file. The migration is idempotent — already-upgraded files are skipped.
+The migration tool scans the directory, upgrades each legacy file, and saves the original as a `.bak` file. The migration is idempotent — already-upgraded files are skipped.
 
 ```bash
 # Example output
-Migration complete: 3 file(s) upgraded, 1 users, 1 index, 1 metadata
+Migration complete: 5 file(s) upgraded, 1 users, 1 index, 2 metadata, 1 data
 0 file(s) skipped (already at latest version)
 ```
 
-The `x2s-migrate` binary is built automatically alongside `x2s`.
+The `x2s-migrate` binary is built automatically alongside `x2s`. To convert between encrypted and unencrypted formats, set (or unset) the `X2S_MASTER_KEY` environment variable or pass a config file with the appropriate `master_key` value before running the migration.

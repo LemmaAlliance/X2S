@@ -96,6 +96,7 @@ int main(int argc, char* argv[])
     printf("  GET   /objects             list owned objects\n");
     printf("  GET   /objects/<id>        retrieve an object\n");
     printf("  DELETE /objects/<id>       remove an object\n");
+    printf("  POST  /objects/<id>/share  share an object with another user\n");
     printf("Press Ctrl-C to stop.\n\n");
 
     signal(SIGINT, handle_sigint);
