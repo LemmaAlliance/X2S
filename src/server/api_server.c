@@ -77,18 +77,6 @@ static int parse_objects_route(const char* url, char extracted_id[65], int* is_s
     return 1;
 }
 
-static enum MHD_Result upload_buffer_init(void** con_cls)
-{
-    if (*con_cls)
-        return MHD_YES;
-    UploadBuffer* ub = calloc(1, sizeof(UploadBuffer));
-    if (!ub)
-        return MHD_NO;
-    ub->type = BUFFER_TYPE_UPLOAD;
-    *con_cls = ub;
-    return MHD_YES;
-}
-
 static enum MHD_Result upload_buffer_accumulate(UploadBuffer* ub, const char* data,
                                                  size_t data_size, size_t max_body_size,
                                                  struct MHD_Connection* conn,
@@ -242,7 +230,6 @@ static enum MHD_Result finalize_put(struct MHD_Connection* conn, ApiServer* serv
         free(obj.data);
 
     char      json[80];
-    size_t    json_len  = 71;
     snprintf(json, sizeof(json), "{\"id\":\"%02x%02x%02x%02x%02x%02x%02x%02x"
                                   "%02x%02x%02x%02x%02x%02x%02x%02x"
                                   "%02x%02x%02x%02x%02x%02x%02x%02x"
@@ -255,6 +242,7 @@ static enum MHD_Result finalize_put(struct MHD_Connection* conn, ApiServer* serv
              obj.id[20], obj.id[21], obj.id[22], obj.id[23],
              obj.id[24], obj.id[25], obj.id[26], obj.id[27],
              obj.id[28], obj.id[29], obj.id[30], obj.id[31]);
+    size_t json_len = strlen(json);
     char* json_copy = malloc(json_len + 1);
     if (!json_copy)
         return MHD_NO;
@@ -597,9 +585,14 @@ static enum MHD_Result handle_auth_register(struct MHD_Connection* conn, ApiServ
                                              const char* upload_data, size_t* upload_data_size,
                                              void** con_cls)
 {
-    enum MHD_Result init_ret = upload_buffer_init(con_cls);
-    if (init_ret != MHD_YES)
-        return init_ret;
+    if (!*con_cls) {
+        UploadBuffer* ub = calloc(1, sizeof(UploadBuffer));
+        if (!ub)
+            return MHD_NO;
+        ub->type = BUFFER_TYPE_UPLOAD;
+        *con_cls = ub;
+        return MHD_YES;
+    }
 
     UploadBuffer* ub = *con_cls;
 
@@ -674,9 +667,14 @@ static enum MHD_Result handle_auth_login(struct MHD_Connection* conn, ApiServer*
                                           const char* upload_data, size_t* upload_data_size,
                                           void** con_cls)
 {
-    enum MHD_Result init_ret = upload_buffer_init(con_cls);
-    if (init_ret != MHD_YES)
-        return init_ret;
+    if (!*con_cls) {
+        UploadBuffer* ub = calloc(1, sizeof(UploadBuffer));
+        if (!ub)
+            return MHD_NO;
+        ub->type = BUFFER_TYPE_UPLOAD;
+        *con_cls = ub;
+        return MHD_YES;
+    }
 
     UploadBuffer* ub = *con_cls;
 
@@ -768,9 +766,14 @@ static enum MHD_Result handle_share(struct MHD_Connection* conn, ApiServer* serv
                                      const char* hex_id, const char* upload_data,
                                      size_t* upload_data_size, void** con_cls)
 {
-    enum MHD_Result init_ret = upload_buffer_init(con_cls);
-    if (init_ret != MHD_YES)
-        return init_ret;
+    if (!*con_cls) {
+        UploadBuffer* ub = calloc(1, sizeof(UploadBuffer));
+        if (!ub)
+            return MHD_NO;
+        ub->type = BUFFER_TYPE_UPLOAD;
+        *con_cls = ub;
+        return MHD_YES;
+    }
 
     UploadBuffer* ub = *con_cls;
 
