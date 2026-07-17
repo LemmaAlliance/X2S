@@ -1,8 +1,10 @@
 #ifndef API_SERVER_H
 #define API_SERVER_H
 
-#include "obj_structs.h"
-#include "auth.h"
+#include "core/object_types.h"
+#include "auth/auth.h"
+
+struct MHD_Daemon;
 
 /*
  * api_server.h — HTTP REST layer for X2S
@@ -37,25 +39,28 @@
  *                                Header: Authorization: Bearer <token>
  *                                Returns 204 No Content.
  *
- * Authentication:
- *   Existing object endpoints now also accept:
- *     Authorization: Bearer <64-hex-char-token>
- *   as an alternative to X-User-Id / X-Username headers.
- *
  * All error responses carry a JSON body: {"error":"<message>"}
  */
 
-typedef struct ApiServer ApiServer;
+typedef struct ApiServer
+{
+    struct MHD_Daemon* daemon;
+    ObjectStore*       store;
+    TokenStore*        tokens;
+    const char*        cors_origin;
+    const char*        temporary_directory;
+} ApiServer;
 
 /*
  * Create and start the HTTP server on the given port and with the specified CORS origin.
  */
-ApiServer *api_server_start(unsigned int port, const char *cors_origin, const char *temporary_directory,
-                            ObjectStore *store, TokenStore *tokens);
+ApiServer* api_server_start(unsigned int port, const char* cors_origin,
+                            const char* temporary_directory, ObjectStore* store,
+                            TokenStore* tokens);
 
 /*
  * Stop the server and free all resources.
  */
-void api_server_stop(ApiServer *server);
+void api_server_stop(ApiServer* server);
 
 #endif /* API_SERVER_H */

@@ -12,7 +12,7 @@ BUILD_DIR="${WORKSPACE_DIR}/build"
 
 # If the user already exists this won't work
 echo "=== Create Account ==="
-RESPONSE=$(curl -s -f -X POST http://localhost:8080/auth/login -d 'username=alice&password=foobar')
+RESPONSE=$(curl -s -f -X POST http://localhost:8080/auth/register -d 'username=alice&password=foobar')
 
 AUTH_TOKEN=$(echo "$RESPONSE" | jq -r '.token')
 
