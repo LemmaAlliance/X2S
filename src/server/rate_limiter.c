@@ -3,8 +3,10 @@
 #include <stdlib.h>
 #include <string.h>
 #include <time.h>
+#include <pthread.h>
 
-#define STALE_TIMEOUT_MS 10000
+#define STALE_TIMEOUT_MS   10000
+#define CLEANUP_INTERVAL_MS 5000
 
 typedef struct Bucket
 {
@@ -20,6 +22,7 @@ struct RateLimiter
     Bucket**            buckets;
     size_t              bucket_count;
     uint64_t            last_cleanup_ms;
+    pthread_mutex_t     mutex;
 };
 
 static uint64_t current_time_ms(void)
@@ -85,6 +88,7 @@ RateLimiter* rate_limiter_create(RateLimitZoneConfig config, size_t bucket_count
     limiter->config         = config;
     limiter->bucket_count   = bucket_count;
     limiter->last_cleanup_ms = current_time_ms();
+    pthread_mutex_init(&limiter->mutex, NULL);
     return limiter;
 }
 
@@ -92,7 +96,9 @@ int rate_limiter_allow(RateLimiter* limiter, const char* client_ip)
 {
     size_t   idx    = hash_ip(client_ip, limiter->bucket_count);
     uint64_t now_ms = current_time_ms();
-    Bucket*  b      = limiter->buckets[idx];
+
+    pthread_mutex_lock(&limiter->mutex);
+    Bucket* b = limiter->buckets[idx];
 
     while (b) {
         if (strcmp(b->client_ip, client_ip) == 0)
@@ -102,20 +108,24 @@ int rate_limiter_allow(RateLimiter* limiter, const char* client_ip)
 
     if (!b) {
         b = bucket_create(client_ip, limiter->config.capacity, now_ms);
-        if (!b)
-            return 1;
+        if (!b) {
+            pthread_mutex_unlock(&limiter->mutex);
+            return 0;
+        }
         b->next           = limiter->buckets[idx];
         limiter->buckets[idx] = b;
     }
 
     bucket_refill(b, &limiter->config, now_ms);
 
+    int allowed = 0;
     if (b->tokens >= 1.0) {
         b->tokens -= 1.0;
-        return 1;
+        allowed = 1;
     }
 
-    return 0;
+    pthread_mutex_unlock(&limiter->mutex);
+    return allowed;
 }
 
 void rate_limiter_cleanup(RateLimiter* limiter)
@@ -126,8 +136,13 @@ void rate_limiter_cleanup(RateLimiter* limiter)
     uint64_t now_ms    = current_time_ms();
     uint64_t threshold = now_ms > STALE_TIMEOUT_MS ? now_ms - STALE_TIMEOUT_MS : 0;
 
-    if (now_ms - limiter->last_cleanup_ms < 5000)
+    if (pthread_mutex_trylock(&limiter->mutex) != 0)
         return;
+
+    if (now_ms - limiter->last_cleanup_ms < CLEANUP_INTERVAL_MS) {
+        pthread_mutex_unlock(&limiter->mutex);
+        return;
+    }
 
     limiter->last_cleanup_ms = now_ms;
 
@@ -146,12 +161,16 @@ void rate_limiter_cleanup(RateLimiter* limiter)
             cur = next;
         }
     }
+
+    pthread_mutex_unlock(&limiter->mutex);
 }
 
 void rate_limiter_destroy(RateLimiter* limiter)
 {
     if (!limiter)
         return;
+
+    pthread_mutex_lock(&limiter->mutex);
 
     for (size_t i = 0; i < limiter->bucket_count; i++) {
         Bucket* cur = limiter->buckets[i];
@@ -163,5 +182,6 @@ void rate_limiter_destroy(RateLimiter* limiter)
     }
 
     free(limiter->buckets);
+    pthread_mutex_destroy(&limiter->mutex);
     free(limiter);
 }

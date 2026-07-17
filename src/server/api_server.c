@@ -844,6 +844,12 @@ static const char* client_ip_from_connection(struct MHD_Connection* conn)
         return inet_ntoa(sin->sin_addr);
     }
 
+    if (ci->client_addr->sa_family == AF_INET6) {
+        struct sockaddr_in6* sin6 = (struct sockaddr_in6*)ci->client_addr;
+        static char buf[INET6_ADDRSTRLEN];
+        return inet_ntop(AF_INET6, &sin6->sin6_addr, buf, sizeof(buf));
+    }
+
     return NULL;
 }
 
