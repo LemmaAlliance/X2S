@@ -68,6 +68,28 @@ static int read_json_stream(FILE* input, char** buffer_out)
     return 0;
 }
 
+static void parse_rate_limit_zone(cJSON* zone, RateLimitConfig* cfg)
+{
+    if (!cJSON_IsObject(zone))
+        return;
+
+    cJSON* capacity_item = cJSON_GetObjectItemCaseSensitive(zone, "capacity");
+    if (cJSON_IsNumber(capacity_item))
+        cfg->capacity = (size_t)capacity_item->valueint;
+
+    cJSON* refill_rate_item = cJSON_GetObjectItemCaseSensitive(zone, "refill_rate");
+    if (cJSON_IsNumber(refill_rate_item))
+        cfg->refill_rate = (size_t)refill_rate_item->valueint;
+
+    cJSON* interval_item = cJSON_GetObjectItemCaseSensitive(zone, "refill_interval_ms");
+    if (cJSON_IsNumber(interval_item))
+        cfg->refill_interval_ms = (unsigned)interval_item->valueint;
+
+    cJSON* bucket_count_item = cJSON_GetObjectItemCaseSensitive(zone, "bucket_count");
+    if (cJSON_IsNumber(bucket_count_item))
+        cfg->bucket_count = (size_t)bucket_count_item->valueint;
+}
+
 int cli_setup_read_config(FILE* input, CliConfig* config)
 {
     const char* data_keys[] = {"data_directory", "data_dir", "dataDirectory"};
@@ -145,6 +167,24 @@ int cli_setup_read_config(FILE* input, CliConfig* config)
         }
     }
 
+    /* rate_limit */
+    {
+        cJSON* rl = cJSON_GetObjectItemCaseSensitive(root, "rate_limit");
+        if (cJSON_IsObject(rl)) {
+            cJSON* enabled = cJSON_GetObjectItemCaseSensitive(rl, "enabled");
+            if (cJSON_IsBool(enabled))
+                config->rate_limit_enabled = cJSON_IsTrue(enabled);
+
+            config->rate_limit_api.bucket_count     = 1024;
+            config->rate_limit_auth.bucket_count    = 256;
+
+            parse_rate_limit_zone(cJSON_GetObjectItemCaseSensitive(rl, "api"),
+                                  &config->rate_limit_api);
+            parse_rate_limit_zone(cJSON_GetObjectItemCaseSensitive(rl, "auth"),
+                                  &config->rate_limit_auth);
+        }
+    }
+
     cJSON_Delete(root);
     free(json);
     return 0;
@@ -166,6 +206,9 @@ int cli_setup_parse(int argc, char* const argv[], CliConfig* config)
     snprintf(config->temporary_directory, sizeof(config->temporary_directory), "%s",
              DEFAULT_TEMP_DIRECTORY);
     config->master_key[0] = '\0';
+    config->rate_limit_enabled = 0;
+    config->rate_limit_api  = (RateLimitConfig){.capacity = 100, .refill_rate = 10, .refill_interval_ms = 1000, .bucket_count = 1024};
+    config->rate_limit_auth = (RateLimitConfig){.capacity = 5, .refill_rate = 1, .refill_interval_ms = 1000, .bucket_count = 256};
 
     for (i = 1; i < argc; ++i) {
         if (strncmp(argv[i], "--config=", 9) == 0) {

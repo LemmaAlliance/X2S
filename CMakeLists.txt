@@ -66,6 +66,7 @@ add_executable(x2s
     src/storage/object_serialization.c
     src/server/http_utils.c
     src/server/mime_types.c
+    src/server/rate_limiter.c
     ${_cjson_c}
 )
 

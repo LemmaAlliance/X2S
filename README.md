@@ -263,12 +263,51 @@ X2S can be configured via a JSON config file using the `--config` flag:
 | `data_directory` | `./x2s_data` | Persistent storage directory |
 | `temporary_directory` | `/tmp/x2s` | Temporary upload directory |
 | `master_key` | `""` | 64-hex-char 256-bit key for AES-256-GCM encryption at rest |
+| `rate_limit.enabled` | `false` | Enable or disable rate limiting |
+| `rate_limit.api.capacity` | `100` | Max burst capacity for general API requests |
+| `rate_limit.api.refill_rate` | `10` | Tokens replenished per refill interval |
+| `rate_limit.api.refill_interval_ms` | `1000` | Refill interval in milliseconds |
+| `rate_limit.api.bucket_count` | `1024` | Hash table size for client IP tracking |
+| `rate_limit.auth.capacity` | `5` | Max burst capacity for `/auth/*` requests |
+| `rate_limit.auth.refill_rate` | `1` | Tokens replenished per refill interval |
+| `rate_limit.auth.refill_interval_ms` | `1000` | Refill interval in milliseconds |
+| `rate_limit.auth.bucket_count` | `256` | Hash table size for client IP tracking |
 
 See `config.example.json` for a full example. All fields are optional. The master key can also be set via the `X2S_MASTER_KEY` environment variable.
 
+### Rate limiting
+
+X2S has a built-in token bucket rate limiter with separate zones for general API and authentication endpoints:
+
+```json
+{
+  "rate_limit": {
+    "enabled": true,
+    "api": {
+      "capacity": 100,
+      "refill_rate": 10,
+      "refill_interval_ms": 1000,
+      "bucket_count": 1024
+    },
+    "auth": {
+      "capacity": 5,
+      "refill_rate": 1,
+      "refill_interval_ms": 1000,
+      "bucket_count": 256
+    }
+  }
+}
+```
+
+- **API zone** applies to all non-auth routes (`/objects`, etc.).
+- **Auth zone** applies to `/auth/*` routes with stricter limits (5 requests/sec) to slow brute-force attempts.
+- Client IPs are tracked via a hash table; stale entries are evicted after 10 seconds of inactivity.
+- OPTIONS (CORS preflight) requests are not rate-limited.
+- Rate limiting is disabled by default.
+
 ## Design notes
 
-* **Single-threaded** — libmicrohttpd's internal polling thread handles all I/O. No locking, no concurrent access safety.
+* **Single-threaded** — libmicrohttpd's internal polling thread handles all I/O. The rate limiter is protected by a mutex for thread safety.
 * **No TLS** — intended for trusted/internal networks. **It is highly recommended to pair this with a reverse proxy like Nginx**.
 * **Content-addressed & Deduplicated** — payload contents are identified via unique data hashes. Multiple metadata targets reference identical chunks on disk, achieving file deduplication across users while preserving access control sandboxing.
 * **Metadata query discovery** — indexes user spaces globally in real-time by crawling local hash-node buckets to enforce precise sandbox filtering constraints quickly.
@@ -277,9 +316,7 @@ See `config.example.json` for a full example. All fields are optional. The maste
 * **Token expiry** — sessions expire after 30 minutes of inactivity. Expired tokens are checked every 100ms via a linear scan (O(n); a linked list or timer wheel is planned for the future).
 * **Maximum password length** — 1024 bytes.
 * **Maximum object size** — no hard limit; uploads are streamed directly to a temporary file on disk, then loaded into memory for storage. Practical limit is available RAM.
-* **No rate limiting** — `/auth/login` accepts unlimited requests; pair with external rate limiting for brute-force protection. (This is a future feature)
-
-For now, use a reverse proxy to rate limit and add TLS.
+* **Rate limiting** — built-in token bucket rate limiter with separate API and auth zones. Disabled by default. See [Rate limiting](#rate-limiting) for configuration.
 
 ## Storage format & migration
 

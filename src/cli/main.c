@@ -1,4 +1,5 @@
 #include "server/api_server.h"
+#include "server/rate_limiter.h"
 #include "auth/auth.h"
 #include "config/config_parser.h"
 #include "storage/object_repository.h"
@@ -73,9 +74,12 @@ int main(int argc, char* argv[])
 
     TokenStore tokens = {.users = users, .sessions = sessions};
 
-    // Pass dynamic port configuration alongside the custom string assignment down safely
+    RateLimitConfig* api_rate  = config.rate_limit_enabled ? &config.rate_limit_api : NULL;
+    RateLimitConfig* auth_rate = config.rate_limit_enabled ? &config.rate_limit_auth : NULL;
+
     ApiServer* api =
-        api_server_start(port, cors_origin, config.temporary_directory, store, &tokens);
+        api_server_start(port, cors_origin, config.temporary_directory, store, &tokens,
+                         api_rate, auth_rate);
     if (!api) {
         fprintf(stderr, "Failed to start API server on port %u\n", port);
         session_store_free(sessions);
@@ -103,6 +107,10 @@ int main(int argc, char* argv[])
     while (running) {
         usleep(MAIN_SLEEP_US);
         check_token_expiry(sessions);
+        if (api->api_limiter)
+            rate_limiter_cleanup(api->api_limiter);
+        if (api->auth_limiter)
+            rate_limiter_cleanup(api->auth_limiter);
     }
 
     printf("\nShutting down...\n");
