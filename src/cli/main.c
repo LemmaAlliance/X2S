@@ -2,6 +2,8 @@
 #include "auth/auth.h"
 #include "config/config_parser.h"
 #include "storage/object_repository.h"
+#include "core/hex_utils.h"
+#include "crypto/encryption.h"
 #include <errno.h>
 #include <signal.h>
 #include <stdio.h>
@@ -86,6 +88,7 @@ int main(int argc, char* argv[])
     printf("Allowed CORS Origin: %s\n", cors_origin);
     printf("Data directory: %s\n", config.data_directory);
     printf("Temporary directory: %s\n", config.temporary_directory);
+    printf("Encryption at rest: %s\n", encryption_is_active() ? "enabled" : "disabled");
     printf("  POST  /auth/register      register a new user\n");
     printf("  POST  /auth/login          authenticate and get a token\n");
     printf("  POST  /auth/logout         invalidate a token\n");

@@ -9,7 +9,8 @@
 typedef enum
 {
     BUFFER_TYPE_UPLOAD,
-    BUFFER_TYPE_FILE_UPLOAD
+    BUFFER_TYPE_FILE_UPLOAD,
+    BUFFER_TYPE_DIRECT
 } BufferType;
 
 typedef struct TokenStore TokenStore;

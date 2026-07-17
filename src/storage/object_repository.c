@@ -8,6 +8,7 @@
 #include "storage/object_index.h"
 #include "storage/object_io.h"
 #include "crypto/object_crypto.h"
+#include "crypto/encryption.h"
 #include "storage/object_serialization.h"
 #include "storage/object_repository.h"
 #include "core/format.h"
@@ -46,6 +47,12 @@ static int resize_store(ObjectStore* store)
     return 1;
 }
 
+static int write_index_v1_body(FILE* f, size_t capacity, size_t count, unsigned char* ids)
+{
+    const FormatVtable* fmt = lookup_format(X2S_FORMAT_VERSION_1);
+    return fmt && fmt->write_index && fmt->write_index(f, capacity, count, ids);
+}
+
 static int write_index(ObjectStore* store)
 {
     char index_path[PATH_MAX_LEN + 16];
@@ -53,10 +60,6 @@ static int write_index(ObjectStore* store)
 
     snprintf(index_path, sizeof(index_path), "%s/__index", store->store_path);
     snprintf(tmp_path, sizeof(tmp_path), "%s/__index.tmp", store->store_path);
-
-    const FormatVtable* fmt = latest_format();
-    if (!fmt || !fmt->write_index)
-        return 0;
 
     unsigned char* ids = NULL;
     if (store->count > 0) {
@@ -87,7 +90,28 @@ static int write_index(ObjectStore* store)
         return 0;
     }
 
-    int ok = fmt->write_index(f, store->capacity, store->count, ids);
+    int ok;
+    if (encryption_is_active()) {
+        char*  body     = NULL;
+        size_t body_len = 0;
+        FILE*  buf      = open_memstream(&body, &body_len);
+        if (!buf) {
+            fclose(f);
+            remove(tmp_path);
+            free(ids);
+            return 0;
+        }
+        ok = write_index_v1_body(buf, store->capacity, store->count, ids);
+        fclose(buf);
+
+        if (ok)
+            ok = write_encrypted_body(f, (unsigned char*)body, body_len);
+        free(body);
+    } else {
+        const FormatVtable* fmt = latest_format();
+        ok = fmt && fmt->write_index && fmt->write_index(f, store->capacity, store->count, ids);
+    }
+
     fclose(f);
     free(ids);
 
@@ -101,6 +125,82 @@ static int write_index(ObjectStore* store)
         return 0;
     }
 
+    return 1;
+}
+
+static int read_index_file(FILE* f, uint8_t version, size_t* capacity, size_t* count,
+                           unsigned char** ids)
+{
+    if (version == X2S_FORMAT_VERSION_2) {
+        if (!encryption_is_active())
+            return -1;
+        DecryptedStream ds = decrypt_file_to_mem(f);
+        fclose(f);
+        if (!ds.stream)
+            return -1;
+
+        const FormatVtable* fmt = lookup_format(X2S_FORMAT_VERSION_1);
+        int ok = fmt && fmt->read_index && fmt->read_index(ds.stream, capacity, count, ids);
+        close_decrypted_stream(&ds);
+        return ok ? 1 : -1;
+    }
+
+    const FormatVtable* fmt = lookup_format(version);
+    if (!fmt || !fmt->read_index)
+        return 0;
+    int ok = fmt->read_index(f, capacity, count, ids);
+    fclose(f);
+    return ok ? 1 : 0;
+}
+
+static int load_index_entries(ObjectStore* store, unsigned char* ids, size_t count, size_t capacity)
+{
+    if (capacity != store->capacity) {
+        ObjectNode** new_buckets = calloc(capacity, sizeof(ObjectNode*));
+        if (!new_buckets)
+            return 0;
+        free(store->buckets);
+        store->buckets  = new_buckets;
+        store->capacity = capacity;
+    }
+
+    store->count = 0;
+
+    for (size_t i = 0; i < count; i++) {
+        unsigned char* id = ids + i * OBJECT_ID_SIZE;
+
+        Object* index_obj = calloc(1, sizeof(Object));
+        if (!index_obj)
+            return 0;
+
+        Object temporary_load = {0};
+        if (read_object_file(store, id, &temporary_load)) {
+            memcpy(index_obj->id, id, OBJECT_ID_SIZE);
+            memcpy(index_obj->owner, temporary_load.owner, USER_ID_SIZE);
+            index_obj->acl  = temporary_load.acl;
+            index_obj->size = temporary_load.size;
+            free(temporary_load.data);
+            free_metadata(temporary_load.metadata);
+        } else {
+            memcpy(index_obj->id, id, OBJECT_ID_SIZE);
+        }
+
+        ObjectNode* node = malloc(sizeof(ObjectNode));
+        if (!node) {
+            if (index_obj->acl) {
+                free(index_obj->acl->entries);
+                free(index_obj->acl);
+            }
+            free(index_obj);
+            return 0;
+        }
+
+        size_t idx          = index_for(store, id);
+        node->obj           = index_obj;
+        node->next          = store->buckets[idx];
+        store->buckets[idx] = node;
+        store->count++;
+    }
     return 1;
 }
 
@@ -120,72 +220,18 @@ int load_index(ObjectStore* store)
         return -1;
     }
 
-    const FormatVtable* fmt = lookup_format(version);
-    if (!fmt || !fmt->read_index) {
-        fclose(f);
-        return 0;
-    }
-
     size_t         capacity = 0;
     size_t         count    = 0;
     unsigned char* ids      = NULL;
 
-    if (!fmt->read_index(f, &capacity, &count, &ids)) {
-        fclose(f);
+    (void)store;
+    int ret = read_index_file(f, version, &capacity, &count, &ids);
+    if (ret <= 0)
+        return ret;
+
+    if (!load_index_entries(store, ids, count, capacity)) {
+        free(ids);
         return 0;
-    }
-    fclose(f);
-
-    if (capacity != store->capacity) {
-        ObjectNode** new_buckets = calloc(capacity, sizeof(ObjectNode*));
-        if (!new_buckets) {
-            free(ids);
-            return 0;
-        }
-        free(store->buckets);
-        store->buckets  = new_buckets;
-        store->capacity = capacity;
-    }
-
-    store->count = 0;
-
-    for (size_t i = 0; i < count; i++) {
-        unsigned char* id = ids + i * 32;
-
-        Object* index_obj = calloc(1, sizeof(Object));
-        if (!index_obj) {
-            free(ids);
-            return 0;
-        }
-
-        Object temporary_load = {0};
-        if (read_object_file(store, id, &temporary_load)) {
-            memcpy(index_obj->id, id, 32);
-            memcpy(index_obj->owner, temporary_load.owner, 16);
-            index_obj->acl  = temporary_load.acl;
-            index_obj->size = temporary_load.size;
-            free(temporary_load.data);
-            free_metadata(temporary_load.metadata);
-        } else {
-            memcpy(index_obj->id, id, 32);
-        }
-
-        ObjectNode* node = malloc(sizeof(ObjectNode));
-        if (!node) {
-            if (index_obj->acl) {
-                free(index_obj->acl->entries);
-                free(index_obj->acl);
-            }
-            free(index_obj);
-            free(ids);
-            return 0;
-        }
-
-        size_t idx          = index_for(store, id);
-        node->obj           = index_obj;
-        node->next          = store->buckets[idx];
-        store->buckets[idx] = node;
-        store->count++;
     }
 
     free(ids);
@@ -323,7 +369,7 @@ static ObjectNode* create_index_entry(Object* obj)
         return NULL;
     }
 
-    node->obj = index_obj;
+    node->obj  = index_obj;
     node->next = NULL;
     return node;
 }
@@ -478,23 +524,10 @@ int remove_object(ObjectStore* store, User* user, const unsigned char id[32])
             char          path[PATH_MAX_LEN + 128];
             object_path(store, id, path, sizeof(path));
 
-            FILE* f = fopen(path, "rb");
-            if (f) {
-                uint8_t version = 0;
-                int     hret    = try_read_header(f, X2S_FILE_TYPE_METADATA, &version);
-                if (hret == -1) {
-                    fclose(f);
-                    goto skip_data_blob;
-                }
-
-                const FormatVtable* fmt = lookup_format(version);
-                if (fmt && fmt->read_data_hash && fmt->read_data_hash(f, data_hash)) {
-                    hash_read_success = 1;
-                }
-                fclose(f);
+            if (read_metadata_data_hash(path, data_hash)) {
+                hash_read_success = 1;
             }
 
-        skip_data_blob:
             if (prev) {
                 prev->next = node->next;
             } else {
@@ -622,9 +655,9 @@ int share_object(ObjectStore* store, User* requester, const unsigned char id[32]
 }
 
 static int object_matches_filters(Object* obj, const char* filter_category,
-                                   const char* filter_filename, const char* filter_extension,
-                                   const char* filter_metadata_key,
-                                   const char* filter_metadata_value)
+                                  const char* filter_filename, const char* filter_extension,
+                                  const char* filter_metadata_key,
+                                  const char* filter_metadata_value)
 {
     if (filter_category && strlen(filter_category) > 0) {
         if (!obj->metadata || !obj->metadata->category ||
