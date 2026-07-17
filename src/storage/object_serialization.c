@@ -2,6 +2,7 @@
 #include <string.h>
 #include <stdio.h>
 #include "core/format.h"
+#include "crypto/encryption.h"
 #include "storage/object_serialization.h"
 
 char* read_string_field(FILE* f, size_t len)
@@ -35,7 +36,7 @@ int try_read_header(FILE* f, uint8_t expected_type, uint8_t* out_version)
 
     if (hdr.magic[0] == X2S_MAGIC_0 && hdr.magic[1] == X2S_MAGIC_1 &&
         hdr.file_type == expected_type) {
-        if (hdr.version > X2S_FORMAT_VERSION_1) {
+        if (hdr.version > X2S_FORMAT_VERSION_2) {
             return -1;
         }
         *out_version = hdr.version;
@@ -48,5 +49,6 @@ int try_read_header(FILE* f, uint8_t expected_type, uint8_t* out_version)
 
 int try_write_header(FILE* f, uint8_t file_type)
 {
-    return write_header(f, file_type, X2S_FORMAT_VERSION_1);
+    uint8_t version = encryption_is_active() ? X2S_FORMAT_VERSION_2 : X2S_FORMAT_VERSION_1;
+    return write_header(f, file_type, version);
 }

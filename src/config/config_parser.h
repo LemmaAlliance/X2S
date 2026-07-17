@@ -9,6 +9,7 @@ typedef struct
     char         cors_origin[4096];
     char         data_directory[4096];
     char         temporary_directory[4096];
+    char         master_key[128];
 } CliConfig;
 
 int cli_setup_parse(int argc, char* const argv[], CliConfig* config);

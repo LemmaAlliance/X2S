@@ -7,8 +7,12 @@
 #include "auth/auth.h"
 #include "core/format.h"
 #include "core/format_registry.h"
+#include "core/hex_utils.h"
+#include "crypto/encryption.h"
 #include "storage/object_serialization.h"
 #include "storage/object_io.h"
+
+#define PATH_MAX_LEN 4096
 
 /* Generic migration engine */
 
@@ -16,7 +20,13 @@ typedef int (*migrate_read_fn)(FILE*, const FormatVtable*, void*);
 typedef int (*migrate_write_fn)(FILE*, const FormatVtable*, void*);
 typedef void (*migrate_free_fn)(void*);
 
-static int do_migrate(const char* path, uint8_t file_type, const FormatVtable* from,
+static int is_target_version(uint8_t version)
+{
+    uint8_t target = encryption_is_active() ? X2S_FORMAT_VERSION_2 : X2S_FORMAT_VERSION_1;
+    return version == target;
+}
+
+static int do_migrate(const char* path, uint8_t file_type, const FormatVtable* reader_fmt,
                       migrate_read_fn reader, migrate_write_fn writer, migrate_free_fn freer,
                       void* ctx)
 {
@@ -24,20 +34,42 @@ static int do_migrate(const char* path, uint8_t file_type, const FormatVtable* f
     if (!f)
         return 0;
 
-    int ok = reader(f, from, ctx);
-    fclose(f);
+    uint8_t on_disk_version = 0;
+    int     hret            = try_read_header(f, file_type, &on_disk_version);
+    if (hret != 1) {
+        fclose(f);
+        return -1;
+    }
+
+    int ok;
+    if (on_disk_version == X2S_FORMAT_VERSION_2) {
+        if (!encryption_is_active()) {
+            fclose(f);
+            return -1;
+        }
+        DecryptedStream ds = decrypt_file_to_mem(f);
+        fclose(f);
+        if (!ds.stream)
+            return -1;
+
+        ok = reader(ds.stream, reader_fmt, ctx);
+        close_decrypted_stream(&ds);
+    } else {
+        ok = reader(f, reader_fmt, ctx);
+        fclose(f);
+    }
     if (!ok)
         return -1;
 
-    char bak_path[4096];
+    char bak_path[PATH_MAX_LEN + 16];
     snprintf(bak_path, sizeof(bak_path), "%s.bak", path);
     if (rename(path, bak_path) != 0) {
         freer(ctx);
         return -1;
     }
 
-    const FormatVtable* to = latest_format();
-    f                      = fopen(path, "wb");
+    const FormatVtable* body_fmt = lookup_format(X2S_FORMAT_VERSION_1);
+    f                            = fopen(path, "wb");
     if (!f) {
         freer(ctx);
         remove(path);
@@ -45,12 +77,47 @@ static int do_migrate(const char* path, uint8_t file_type, const FormatVtable* f
         return -1;
     }
 
-    if (!try_write_header(f, file_type) || !writer(f, to, ctx)) {
+    if (!try_write_header(f, file_type)) {
         fclose(f);
         remove(path);
         rename(bak_path, path);
         freer(ctx);
         return -1;
+    }
+
+    if (encryption_is_active()) {
+        char*  body = NULL;
+        size_t body_len = 0;
+        FILE*  buf = open_memstream(&body, &body_len);
+        if (!buf) {
+            fclose(f);
+            remove(path);
+            rename(bak_path, path);
+            freer(ctx);
+            return -1;
+        }
+        ok = writer(buf, body_fmt, ctx);
+        fclose(buf);
+
+        if (ok)
+            ok = write_encrypted_body(f, (unsigned char*)body, body_len);
+        free(body);
+
+        if (!ok) {
+            fclose(f);
+            remove(path);
+            rename(bak_path, path);
+            freer(ctx);
+            return -1;
+        }
+    } else {
+        if (!writer(f, body_fmt, ctx)) {
+            fclose(f);
+            remove(path);
+            rename(bak_path, path);
+            freer(ctx);
+            return -1;
+        }
     }
     fclose(f);
 
@@ -202,12 +269,33 @@ int main(int argc, char* argv[])
         return 1;
     }
 
+    const char* env_key = getenv("X2S_MASTER_KEY");
+    if (env_key) {
+        size_t key_len = strlen(env_key);
+        if (key_len != X2S_KEY_SIZE * 2) {
+            fprintf(stderr, "error: X2S_MASTER_KEY must be %d hex characters (got %zu)\n",
+                    X2S_KEY_SIZE * 2, key_len);
+            return 1;
+        }
+        unsigned char key_bytes[X2S_KEY_SIZE];
+        if (!hex_to_bytes(env_key, key_bytes, X2S_KEY_SIZE)) {
+            fprintf(stderr, "error: X2S_MASTER_KEY contains invalid hex characters\n");
+            return 1;
+        }
+        if (!encryption_init(key_bytes)) {
+            fprintf(stderr, "error: failed to initialize encryption\n");
+            return 1;
+        }
+    }
+
     int migrated_count = 0;
     int skipped_count  = 0;
     int users_migrated = 0, index_migrated = 0, metadata_count = 0;
 
     char    path[4096];
     uint8_t version = 0;
+
+    const FormatVtable* v1_fmt = lookup_format(X2S_FORMAT_VERSION_1);
 
     /* Phase 1: __index */
     snprintf(path, sizeof(path), "%s/__index", data_dir);
@@ -217,18 +305,15 @@ int main(int argc, char* argv[])
         fclose(f);
         if (hret == -1) {
             fprintf(stderr, "  [skip]  %s: unknown version\n", path);
-        } else if (hret == 1 && version == latest_format()->version) {
+        } else if (hret == 1 && is_target_version(version)) {
             skipped_count++;
-        } else {
-            const FormatVtable* fmt = lookup_format(version);
-            if (fmt && fmt->read_index) {
-                int ret = migrate_index(path, fmt);
-                if (ret > 0) {
-                    migrated_count++;
-                    index_migrated = 1;
-                } else if (ret == 0)
-                    skipped_count++;
-            }
+        } else if (version == X2S_FORMAT_VERSION_2 || (v1_fmt && v1_fmt->read_index)) {
+            int ret = migrate_index(path, v1_fmt);
+            if (ret > 0) {
+                migrated_count++;
+                index_migrated = 1;
+            } else if (ret == 0)
+                skipped_count++;
         }
     }
 
@@ -240,18 +325,15 @@ int main(int argc, char* argv[])
         fclose(f);
         if (hret == -1) {
             fprintf(stderr, "  [skip]  %s: unknown version\n", path);
-        } else if (hret == 1 && version == latest_format()->version) {
+        } else if (hret == 1 && is_target_version(version)) {
             skipped_count++;
-        } else {
-            const FormatVtable* fmt = lookup_format(version);
-            if (fmt && fmt->read_users) {
-                int ret = migrate_users(path, fmt);
-                if (ret > 0) {
-                    migrated_count++;
-                    users_migrated = 1;
-                } else if (ret == 0)
-                    skipped_count++;
-            }
+        } else if (version == X2S_FORMAT_VERSION_2 || (v1_fmt && v1_fmt->read_users)) {
+            int ret = migrate_users(path, v1_fmt);
+            if (ret > 0) {
+                migrated_count++;
+                users_migrated = 1;
+            } else if (ret == 0)
+                skipped_count++;
         }
     }
 
@@ -265,6 +347,32 @@ int main(int argc, char* argv[])
     struct dirent* entry;
     while ((entry = readdir(dir)) != NULL) {
         if (!is_metadata_filename(entry->d_name))
+            goto check_data_blob;
+
+        snprintf(path, sizeof(path), "%s/%s", data_dir, entry->d_name);
+        f = fopen(path, "rb");
+        if (!f)
+            goto check_data_blob;
+
+        int hret = try_read_header(f, X2S_FILE_TYPE_METADATA, &version);
+        fclose(f);
+
+        if (hret == -1) {
+            fprintf(stderr, "  [skip]  %s: unknown version\n", path);
+        } else if (hret == 1 && is_target_version(version)) {
+            skipped_count++;
+        } else if (version == X2S_FORMAT_VERSION_2 || (v1_fmt && v1_fmt->read_metadata)) {
+            int ret = migrate_metadata(path, v1_fmt);
+            if (ret > 0) {
+                migrated_count++;
+                metadata_count++;
+            } else if (ret == 0)
+                skipped_count++;
+        }
+
+    check_data_blob:
+        /* Phase 4: data blob files */
+        if (strncmp(entry->d_name, "data_", 5) != 0)
             continue;
 
         snprintf(path, sizeof(path), "%s/%s", data_dir, entry->d_name);
@@ -272,23 +380,85 @@ int main(int argc, char* argv[])
         if (!f)
             continue;
 
-        int hret = try_read_header(f, X2S_FILE_TYPE_METADATA, &version);
+        unsigned char peek[4];
+        size_t n = fread(peek, 1, 4, f);
         fclose(f);
 
-        if (hret == -1) {
-            fprintf(stderr, "  [skip]  %s: unknown version\n", path);
-        } else if (hret == 1 && version == latest_format()->version) {
+        int is_encrypted = (n == 4 && peek[0] == X2S_MAGIC_0 &&
+                            peek[1] == X2S_MAGIC_1 &&
+                            peek[2] == X2S_FILE_TYPE_DATA && peek[3] == 1);
+
+        if ((is_encrypted && encryption_is_active()) ||
+            (!is_encrypted && !encryption_is_active())) {
             skipped_count++;
-        } else {
-            const FormatVtable* fmt = lookup_format(version);
-            if (fmt && fmt->read_metadata) {
-                int ret = migrate_metadata(path, fmt);
-                if (ret > 0) {
-                    migrated_count++;
-                    metadata_count++;
-                } else if (ret == 0)
-                    skipped_count++;
+            continue;
+        }
+
+        f = fopen(path, "rb");
+        if (!f)
+            continue;
+        fseek(f, 0, SEEK_END);
+        long len = ftell(f);
+        fseek(f, 0, SEEK_SET);
+        unsigned char* data = malloc(len);
+        if (!data || fread(data, 1, len, f) != (size_t)len) {
+            free(data);
+            fclose(f);
+            continue;
+        }
+        fclose(f);
+
+        char bak_path[PATH_MAX_LEN + 16];
+        snprintf(bak_path, sizeof(bak_path), "%s.bak", path);
+        int migrate_ok = 0;
+
+        if (is_encrypted && !encryption_is_active()) {
+            unsigned char* plaintext = NULL;
+            size_t         pt_len = 0;
+            if (decrypt(data + 4, len - 4, &plaintext, &pt_len)) {
+                if (rename(path, bak_path) == 0) {
+                    FILE* wf = fopen(path, "wb");
+                    if (wf) {
+                        if (fwrite(plaintext, 1, pt_len, wf) == pt_len)
+                            migrate_ok = 1;
+                        fclose(wf);
+                    }
+                    if (!migrate_ok) {
+                        remove(path);
+                        rename(bak_path, path);
+                    }
+                }
+                free(plaintext);
             }
+        } else if (!is_encrypted && encryption_is_active()) {
+            unsigned char* encrypted = NULL;
+            size_t         enc_len = 0;
+            if (encrypt(data, len, &encrypted, &enc_len)) {
+                if (rename(path, bak_path) == 0) {
+                    FILE* wf = fopen(path, "wb");
+                    if (wf) {
+                        unsigned char hdr[4] = {X2S_MAGIC_0, X2S_MAGIC_1,
+                                                X2S_FILE_TYPE_DATA, 1};
+                        if (fwrite(hdr, 1, 4, wf) == 4 &&
+                            fwrite(encrypted, 1, enc_len, wf) == enc_len)
+                            migrate_ok = 1;
+                        fclose(wf);
+                    }
+                    if (!migrate_ok) {
+                        remove(path);
+                        rename(bak_path, path);
+                    }
+                }
+                free(encrypted);
+            }
+        }
+        free(data);
+
+        if (migrate_ok) {
+            migrated_count++;
+            fprintf(stderr, "  [migrated]  %s  ->  %s\n", path, bak_path);
+        } else {
+            skipped_count++;
         }
     }
     closedir(dir);
@@ -300,7 +470,7 @@ int main(int argc, char* argv[])
         printf(", 1 index");
     if (metadata_count > 0)
         printf(", %d metadata", metadata_count);
-    printf("\n%d file(s) skipped (already at latest version)\n", skipped_count);
+    printf("\n%d file(s) skipped\n", skipped_count);
 
     return 0;
 }

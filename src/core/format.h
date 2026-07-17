@@ -10,8 +10,10 @@
 #define X2S_FILE_TYPE_METADATA 0x01
 #define X2S_FILE_TYPE_INDEX 0x02
 #define X2S_FILE_TYPE_USERS 0x03
+#define X2S_FILE_TYPE_DATA 0x04
 
 #define X2S_FORMAT_VERSION_1 1
+#define X2S_FORMAT_VERSION_2 2
 
 typedef struct
 {

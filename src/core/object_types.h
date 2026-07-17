@@ -9,6 +9,10 @@
 #define PERM_WRITE 2
 #define PERM_DELETE 4
 
+#define OBJECT_ID_SIZE 32
+#define USER_ID_SIZE 16
+#define OBJECT_ID_HEX_SIZE (OBJECT_ID_SIZE * 2 + 1)
+
 typedef struct
 {
     char          username[64];

@@ -15,6 +15,11 @@
 
 /* CORS support */
 
+static const struct
+{
+    BufferType type;
+} direct_request_sentinel = {BUFFER_TYPE_DIRECT};
+
 #define CORS_METHODS "GET, POST, DELETE, OPTIONS"
 #define CORS_HEADERS                                                                               \
     "Authorization, Content-Type, X-Filename, X-Category, X-Extension, X-Metadata-*"
@@ -78,9 +83,9 @@ static int parse_objects_route(const char* url, char extracted_id[65], int* is_s
 }
 
 static enum MHD_Result upload_buffer_accumulate(UploadBuffer* ub, const char* data,
-                                                 size_t data_size, size_t max_body_size,
-                                                 struct MHD_Connection* conn,
-                                                 const char* cors_origin)
+                                                size_t data_size, size_t max_body_size,
+                                                struct MHD_Connection* conn,
+                                                const char*            cors_origin)
 {
     if (ub->len + data_size > max_body_size)
         return send_error_cors(conn, cors_origin, MHD_HTTP_BAD_REQUEST, "body too large");
@@ -229,21 +234,13 @@ static enum MHD_Result finalize_put(struct MHD_Connection* conn, ApiServer* serv
     if (obj.data)
         free(obj.data);
 
-    char      json[80];
-    snprintf(json, sizeof(json), "{\"id\":\"%02x%02x%02x%02x%02x%02x%02x%02x"
-                                  "%02x%02x%02x%02x%02x%02x%02x%02x"
-                                  "%02x%02x%02x%02x%02x%02x%02x%02x"
-                                  "%02x%02x%02x%02x%02x%02x%02x%02x\"}",
-             obj.id[0], obj.id[1], obj.id[2], obj.id[3],
-             obj.id[4], obj.id[5], obj.id[6], obj.id[7],
-             obj.id[8], obj.id[9], obj.id[10], obj.id[11],
-             obj.id[12], obj.id[13], obj.id[14], obj.id[15],
-             obj.id[16], obj.id[17], obj.id[18], obj.id[19],
-             obj.id[20], obj.id[21], obj.id[22], obj.id[23],
-             obj.id[24], obj.id[25], obj.id[26], obj.id[27],
-             obj.id[28], obj.id[29], obj.id[30], obj.id[31]);
-    size_t json_len = strlen(json);
-    char* json_copy = malloc(json_len + 1);
+    char hex_id[OBJECT_ID_HEX_SIZE];
+    bytes_to_hex(obj.id, OBJECT_ID_SIZE, hex_id);
+
+    char json[80 + OBJECT_ID_HEX_SIZE];
+    snprintf(json, sizeof(json), "{\"id\":\"%s\"}", hex_id);
+    size_t json_len  = strlen(json);
+    char*  json_copy = malloc(json_len + 1);
     if (!json_copy)
         return MHD_NO;
     memcpy(json_copy, json, json_len + 1);
@@ -435,8 +432,8 @@ static char* build_metadata_json(Object* obj, size_t* out_len)
             continue;
         char* ek = json_escape(obj->metadata->metadata_keys[m]);
         char* ev = json_escape(obj->metadata->metadata_values[m]);
-        int   n  = snprintf(meta_json + pos, cap - pos, "%s\"%s\":\"%s\"",
-                            (pos > 1) ? "," : "", ek ? ek : "", ev ? ev : "");
+        int   n  = snprintf(meta_json + pos, cap - pos, "%s\"%s\":\"%s\"", (pos > 1) ? "," : "",
+                            ek ? ek : "", ev ? ev : "");
         if (n > 0)
             pos += (size_t)n;
         free(ek);
@@ -460,6 +457,51 @@ static void free_object_list(Object** objects, size_t count)
         free(objects[i]);
     }
     free(objects);
+}
+
+static int append_object_json(char** json, size_t* cap, size_t* len, Object* obj, size_t index)
+{
+    char hex_id[OBJECT_ID_HEX_SIZE] = {0};
+    bytes_to_hex(obj->id, OBJECT_ID_SIZE, hex_id);
+
+    const char* obj_cat = (obj->metadata && obj->metadata->category) ? obj->metadata->category : "";
+    const char* obj_fn  = (obj->metadata && obj->metadata->filename) ? obj->metadata->filename : "";
+    const char* obj_ext =
+        (obj->metadata && obj->metadata->extension) ? obj->metadata->extension : "";
+
+    char *ecat = json_escape(obj_cat), *efn = json_escape(obj_fn), *eext = json_escape(obj_ext);
+    char* meta_json = build_metadata_json(obj, NULL);
+
+    size_t entry_len = 200 + strlen(hex_id) + (ecat ? strlen(ecat) : 0) + (efn ? strlen(efn) : 0) +
+                       (eext ? strlen(eext) : 0) + (meta_json ? strlen(meta_json) : 0);
+
+    if (*len + entry_len + 1 >= *cap) {
+        *cap      = *len + entry_len + 4096;
+        char* tmp = realloc(*json, *cap);
+        if (!tmp) {
+            free(ecat);
+            free(efn);
+            free(eext);
+            free(meta_json);
+            return 0;
+        }
+        *json = tmp;
+    }
+
+    int res = snprintf(*json + *len, *cap - *len,
+                       "%s{\"id\":\"%s\",\"category\":\"%s\",\"filename\":\"%s\","
+                       "\"extension\":\"%s\",\"size\":%zu,\"metadata\":%s}",
+                       (index > 0) ? "," : "", hex_id, ecat ? ecat : "", efn ? efn : "",
+                       eext ? eext : "", obj->size, meta_json ? meta_json : "{}");
+
+    free(meta_json);
+    free(ecat);
+    free(efn);
+    free(eext);
+
+    if (res > 0)
+        *len += (size_t)res;
+    return 1;
 }
 
 static enum MHD_Result handle_list_objects(struct MHD_Connection* conn, ApiServer* server)
@@ -495,59 +537,15 @@ static enum MHD_Result handle_list_objects(struct MHD_Connection* conn, ApiServe
     size_t json_len = strlen(json);
 
     for (size_t i = 0; i < count; i++) {
-        char hex_id[65] = {0};
-        bytes_to_hex(objects[i]->id, 32, hex_id);
-
-        const char* obj_cat = (objects[i]->metadata && objects[i]->metadata->category) ?
-                                  objects[i]->metadata->category :
-                                  "";
-        const char* obj_fn  = (objects[i]->metadata && objects[i]->metadata->filename) ?
-                                  objects[i]->metadata->filename :
-                                  "";
-        const char* obj_ext = (objects[i]->metadata && objects[i]->metadata->extension) ?
-                                  objects[i]->metadata->extension :
-                                  "";
-
-        char *ecat = json_escape(obj_cat), *efn = json_escape(obj_fn), *eext = json_escape(obj_ext);
-        char* meta_json = build_metadata_json(objects[i], NULL);
-
-        size_t obj_entry_len = 200 + strlen(hex_id) + (ecat ? strlen(ecat) : 0) +
-                               (efn ? strlen(efn) : 0) + (eext ? strlen(eext) : 0) +
-                               (meta_json ? strlen(meta_json) : 0);
-
-        if (json_len + obj_entry_len + 1 >= json_cap) {
-            json_cap = json_len + obj_entry_len + 4096;
-            char* tmp = realloc(json, json_cap);
-            if (!tmp) {
-                free_object_list(objects, count);
-                free(json);
-                free(ecat);
-                free(efn);
-                free(eext);
-                free(meta_json);
-                return MHD_NO;
-            }
-            json = tmp;
+        if (!append_object_json(&json, &json_cap, &json_len, objects[i], i)) {
+            free_object_list(objects, count);
+            free(json);
+            return MHD_NO;
         }
-
-        int res = snprintf(json + json_len, json_cap - json_len,
-                           "%s{\"id\":\"%s\",\"category\":\"%s\",\"filename\":\"%s\","
-                           "\"extension\":\"%s\",\"size\":%zu,\"metadata\":%s}",
-                           (i > 0) ? "," : "", hex_id,
-                           ecat ? ecat : "", efn ? efn : "", eext ? eext : "",
-                           objects[i]->size, meta_json ? meta_json : "{}");
-
-        free(meta_json);
-        free(ecat);
-        free(efn);
-        free(eext);
-
-        if (res > 0)
-            json_len += (size_t)res;
     }
 
     if (json_len + 3 > json_cap) {
-        json_cap = json_len + 3;
+        json_cap  = json_len + 3;
         char* tmp = realloc(json, json_cap);
         if (!tmp) {
             free_object_list(objects, count);
@@ -577,13 +575,50 @@ static enum MHD_Result handle_list_objects(struct MHD_Connection* conn, ApiServe
 
 /* Auth route handlers */
 
-/*
- * Common handler for POST /auth/register and POST /auth/login.
- * Follows the same body-accumulation pattern as handle_put.
- */
-static enum MHD_Result handle_auth_register(struct MHD_Connection* conn, ApiServer* server,
-                                             const char* upload_data, size_t* upload_data_size,
-                                             void** con_cls)
+typedef int (*auth_authenticator_t)(UserStore*, const char*, const char*,
+                                    unsigned char[USER_ID_SIZE]);
+
+static enum MHD_Result build_auth_response(struct MHD_Connection* conn, ApiServer* server,
+                                           const unsigned char user_id[USER_ID_SIZE],
+                                           unsigned int        status)
+{
+    char* token_hex = session_create(server->tokens->sessions, user_id);
+    if (!token_hex)
+        return send_error_cors(conn, server->cors_origin, MHD_HTTP_INTERNAL_SERVER_ERROR,
+                               "failed to create session");
+
+    char user_id_hex[USER_ID_SIZE * 2 + 1] = {0};
+    bytes_to_hex(user_id, USER_ID_SIZE, user_id_hex);
+
+    size_t json_len = strlen(token_hex) + strlen(user_id_hex) + 40;
+    char*  json     = malloc(json_len + 1);
+    if (!json) {
+        free(token_hex);
+        return MHD_NO;
+    }
+
+    snprintf(json, json_len + 1, "{\"token\":\"%s\",\"user_id\":\"%s\"}", token_hex, user_id_hex);
+    free(token_hex);
+
+    struct MHD_Response* resp =
+        MHD_create_response_from_buffer(strlen(json), json, MHD_RESPMEM_MUST_FREE);
+    if (!resp) {
+        free(json);
+        return MHD_NO;
+    }
+
+    MHD_add_response_header(resp, "Content-Type", "application/json");
+    add_cors_headers(resp, server->cors_origin);
+    enum MHD_Result ret = MHD_queue_response(conn, status, resp);
+    MHD_destroy_response(resp);
+    return ret;
+}
+
+static enum MHD_Result handle_auth_common(struct MHD_Connection* conn, ApiServer* server,
+                                          const char* upload_data, size_t* upload_data_size,
+                                          void** con_cls, auth_authenticator_t auth_fn,
+                                          const char* fail_msg, unsigned int fail_status,
+                                          unsigned int success_status)
 {
     if (!*con_cls) {
         UploadBuffer* ub = calloc(1, sizeof(UploadBuffer));
@@ -598,7 +633,7 @@ static enum MHD_Result handle_auth_register(struct MHD_Connection* conn, ApiServ
 
     if (*upload_data_size > 0) {
         enum MHD_Result ret = upload_buffer_accumulate(ub, upload_data, *upload_data_size, 4096,
-                                                        conn, server->cors_origin);
+                                                       conn, server->cors_origin);
         if (ret != MHD_YES)
             return ret;
         *upload_data_size = 0;
@@ -620,52 +655,16 @@ static enum MHD_Result handle_auth_register(struct MHD_Connection* conn, ApiServ
         return send_error_cors(conn, server->cors_origin, MHD_HTTP_BAD_REQUEST,
                                "username and password required");
 
-    unsigned char user_id[16];
-    if (!user_store_register(server->tokens->users, username, password, user_id))
-        return send_error_cors(conn, server->cors_origin, MHD_HTTP_CONFLICT,
-                               "username already taken or invalid");
+    unsigned char user_id[USER_ID_SIZE];
+    if (!auth_fn(server->tokens->users, username, password, user_id))
+        return send_error_cors(conn, server->cors_origin, fail_status, fail_msg);
 
-    char* token_hex = session_create(server->tokens->sessions, user_id);
-    if (!token_hex)
-        return send_error_cors(conn, server->cors_origin, MHD_HTTP_INTERNAL_SERVER_ERROR,
-                               "failed to create session");
-
-    if (!user_store_save(server->tokens->users, server->store->store_path)) {
-        free(token_hex);
-        return send_error_cors(conn, server->cors_origin, MHD_HTTP_INTERNAL_SERVER_ERROR,
-                               "failed to persist users");
-    }
-
-    char user_id_hex[33] = {0};
-    bytes_to_hex(user_id, 16, user_id_hex);
-
-    size_t json_len = strlen(token_hex) + strlen(user_id_hex) + 40;
-    char*  json     = malloc(json_len + 1);
-    if (!json) {
-        free(token_hex);
-        return MHD_NO;
-    }
-
-    snprintf(json, json_len + 1, "{\"token\":\"%s\",\"user_id\":\"%s\"}", token_hex, user_id_hex);
-    free(token_hex);
-
-    struct MHD_Response* resp =
-        MHD_create_response_from_buffer(strlen(json), json, MHD_RESPMEM_MUST_FREE);
-    if (!resp) {
-        free(json);
-        return MHD_NO;
-    }
-
-    MHD_add_response_header(resp, "Content-Type", "application/json");
-    add_cors_headers(resp, server->cors_origin);
-    enum MHD_Result ret = MHD_queue_response(conn, MHD_HTTP_CREATED, resp);
-    MHD_destroy_response(resp);
-    return ret;
+    return build_auth_response(conn, server, user_id, success_status);
 }
 
-static enum MHD_Result handle_auth_login(struct MHD_Connection* conn, ApiServer* server,
-                                          const char* upload_data, size_t* upload_data_size,
-                                          void** con_cls)
+static enum MHD_Result handle_auth_register(struct MHD_Connection* conn, ApiServer* server,
+                                            const char* upload_data, size_t* upload_data_size,
+                                            void** con_cls)
 {
     if (!*con_cls) {
         UploadBuffer* ub = calloc(1, sizeof(UploadBuffer));
@@ -680,7 +679,7 @@ static enum MHD_Result handle_auth_login(struct MHD_Connection* conn, ApiServer*
 
     if (*upload_data_size > 0) {
         enum MHD_Result ret = upload_buffer_accumulate(ub, upload_data, *upload_data_size, 4096,
-                                                        conn, server->cors_origin);
+                                                       conn, server->cors_origin);
         if (ret != MHD_YES)
             return ret;
         *upload_data_size = 0;
@@ -698,41 +697,29 @@ static enum MHD_Result handle_auth_login(struct MHD_Connection* conn, ApiServer*
         return send_error_cors(conn, server->cors_origin, MHD_HTTP_BAD_REQUEST,
                                "missing username or password");
 
-    unsigned char user_id[16];
-    if (!user_store_authenticate(server->tokens->users, username, password, user_id))
-        return send_error_cors(conn, server->cors_origin, MHD_HTTP_UNAUTHORIZED,
-                               "invalid username or password");
+    if (strlen(username) == 0 || strlen(password) == 0)
+        return send_error_cors(conn, server->cors_origin, MHD_HTTP_BAD_REQUEST,
+                               "username and password required");
 
-    char* token_hex = session_create(server->tokens->sessions, user_id);
-    if (!token_hex)
+    unsigned char user_id[USER_ID_SIZE];
+    if (!user_store_register(server->tokens->users, username, password, user_id))
+        return send_error_cors(conn, server->cors_origin, MHD_HTTP_CONFLICT,
+                               "username already taken or invalid");
+
+    if (!user_store_save(server->tokens->users, server->store->store_path))
         return send_error_cors(conn, server->cors_origin, MHD_HTTP_INTERNAL_SERVER_ERROR,
-                               "failed to create session");
+                               "failed to persist users");
 
-    char user_id_hex[33] = {0};
-    bytes_to_hex(user_id, 16, user_id_hex);
+    return build_auth_response(conn, server, user_id, MHD_HTTP_CREATED);
+}
 
-    size_t json_len = strlen(token_hex) + strlen(user_id_hex) + 40;
-    char*  json     = malloc(json_len + 1);
-    if (!json) {
-        free(token_hex);
-        return MHD_NO;
-    }
-
-    snprintf(json, json_len + 1, "{\"token\":\"%s\",\"user_id\":\"%s\"}", token_hex, user_id_hex);
-    free(token_hex);
-
-    struct MHD_Response* resp =
-        MHD_create_response_from_buffer(strlen(json), json, MHD_RESPMEM_MUST_FREE);
-    if (!resp) {
-        free(json);
-        return MHD_NO;
-    }
-
-    MHD_add_response_header(resp, "Content-Type", "application/json");
-    add_cors_headers(resp, server->cors_origin);
-    enum MHD_Result ret = MHD_queue_response(conn, MHD_HTTP_OK, resp);
-    MHD_destroy_response(resp);
-    return ret;
+static enum MHD_Result handle_auth_login(struct MHD_Connection* conn, ApiServer* server,
+                                         const char* upload_data, size_t* upload_data_size,
+                                         void** con_cls)
+{
+    return handle_auth_common(conn, server, upload_data, upload_data_size, con_cls,
+                              user_store_authenticate, "invalid username or password",
+                              MHD_HTTP_UNAUTHORIZED, MHD_HTTP_OK);
 }
 
 static enum MHD_Result handle_auth_logout(struct MHD_Connection* conn, ApiServer* server)
@@ -763,8 +750,8 @@ static enum MHD_Result handle_auth_logout(struct MHD_Connection* conn, ApiServer
 }
 
 static enum MHD_Result handle_share(struct MHD_Connection* conn, ApiServer* server,
-                                     const char* hex_id, const char* upload_data,
-                                     size_t* upload_data_size, void** con_cls)
+                                    const char* hex_id, const char* upload_data,
+                                    size_t* upload_data_size, void** con_cls)
 {
     if (!*con_cls) {
         UploadBuffer* ub = calloc(1, sizeof(UploadBuffer));
@@ -779,7 +766,7 @@ static enum MHD_Result handle_share(struct MHD_Connection* conn, ApiServer* serv
 
     if (*upload_data_size > 0) {
         enum MHD_Result ret = upload_buffer_accumulate(ub, upload_data, *upload_data_size, 4096,
-                                                        conn, server->cors_origin);
+                                                       conn, server->cors_origin);
         if (ret != MHD_YES)
             return ret;
         *upload_data_size = 0;
@@ -837,9 +824,9 @@ static enum MHD_Result handle_share(struct MHD_Connection* conn, ApiServer* serv
 /* Main MHD access callback — router */
 
 static enum MHD_Result access_handler(void* cls, struct MHD_Connection* conn, const char* url,
-                                       const char* method, const char* version,
-                                       const char* upload_data, size_t* upload_data_size,
-                                       void** con_cls)
+                                      const char* method, const char* version,
+                                      const char* upload_data, size_t* upload_data_size,
+                                      void** con_cls)
 {
     (void)version;
 
@@ -903,7 +890,7 @@ static enum MHD_Result access_handler(void* cls, struct MHD_Connection* conn, co
         }
 
         if (!*con_cls) {
-            *con_cls = (void*)1;
+            *con_cls = (void*)&direct_request_sentinel;
             return MHD_YES;
         }
 
@@ -931,10 +918,7 @@ static void request_completed(void* cls, struct MHD_Connection* conn, void** con
     if (!con_cls || !*con_cls)
         return;
 
-    /*
-   * GET/DELETE/logout use the sentinel value 1.
-   */
-    if (*con_cls == (void*)1) {
+    if (*con_cls == (void*)&direct_request_sentinel) {
         *con_cls = NULL;
         return;
     }

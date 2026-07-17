@@ -62,6 +62,7 @@ add_executable(x2s
     src/storage/object_index.c
     src/storage/object_io.c
     src/crypto/object_crypto.c
+    src/crypto/encryption.c
     src/storage/object_serialization.c
     src/server/http_utils.c
     src/server/mime_types.c
@@ -86,6 +87,7 @@ add_executable(x2s-migrate
     src/format/format_v1.c
     src/storage/object_io.c
     src/crypto/object_crypto.c
+    src/crypto/encryption.c
     src/storage/object_serialization.c
     ${_cjson_c}
 )

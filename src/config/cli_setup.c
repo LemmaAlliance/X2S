@@ -8,6 +8,8 @@
 #include <unistd.h>
 
 #include "cJSON.h"
+#include "core/hex_utils.h"
+#include "crypto/encryption.h"
 
 #define DEFAULT_PORT 8080
 #define DEFAULT_CORS "*"
@@ -72,6 +74,7 @@ int cli_setup_read_config(FILE* input, CliConfig* config)
     const char* temp_keys[] = {"temporary_directory", "temporary_dir", "temp_directory", "temp_dir",
                                "temporaryDirectory",  "tempDirectory"};
     const char* cors_keys[] = {"cors_origin", "corsOrigin"};
+    const char* key_keys[] = {"master_key", "masterKey"};
     char*       json        = NULL;
     size_t      i;
 
@@ -133,6 +136,15 @@ int cli_setup_read_config(FILE* input, CliConfig* config)
         }
     }
 
+    /* master key */
+    for (i = 0; i < sizeof(key_keys) / sizeof(key_keys[0]); i++) {
+        cJSON* item = cJSON_GetObjectItemCaseSensitive(root, key_keys[i]);
+        if (cJSON_IsString(item) && item->valuestring) {
+            snprintf(config->master_key, sizeof(config->master_key), "%s", item->valuestring);
+            break;
+        }
+    }
+
     cJSON_Delete(root);
     free(json);
     return 0;
@@ -153,6 +165,7 @@ int cli_setup_parse(int argc, char* const argv[], CliConfig* config)
     snprintf(config->data_directory, sizeof(config->data_directory), "%s", DEFAULT_DATA_DIRECTORY);
     snprintf(config->temporary_directory, sizeof(config->temporary_directory), "%s",
              DEFAULT_TEMP_DIRECTORY);
+    config->master_key[0] = '\0';
 
     for (i = 1; i < argc; ++i) {
         if (strncmp(argv[i], "--config=", 9) == 0) {
@@ -193,6 +206,31 @@ int cli_setup_parse(int argc, char* const argv[], CliConfig* config)
         }
 
         fclose(config_file);
+    }
+
+    if (config->master_key[0] == '\0') {
+        const char* env_key = getenv("X2S_MASTER_KEY");
+        if (env_key) {
+            snprintf(config->master_key, sizeof(config->master_key), "%s", env_key);
+        }
+    }
+
+    if (config->master_key[0] != '\0') {
+        size_t key_len = strlen(config->master_key);
+        if (key_len != X2S_KEY_SIZE * 2) {
+            fprintf(stderr, "error: master_key must be %d hex characters (got %zu)\n",
+                    X2S_KEY_SIZE * 2, key_len);
+            return 1;
+        }
+        unsigned char key_bytes[X2S_KEY_SIZE];
+        if (!hex_to_bytes(config->master_key, key_bytes, X2S_KEY_SIZE)) {
+            fprintf(stderr, "error: master_key contains invalid hex characters\n");
+            return 1;
+        }
+        if (!encryption_init(key_bytes)) {
+            fprintf(stderr, "error: failed to initialize encryption\n");
+            return 1;
+        }
     }
 
     return 0;

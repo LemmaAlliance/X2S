@@ -9,6 +9,8 @@
 #include "core/format.h"
 #include "core/format_registry.h"
 #include "core/hex_utils.h"
+#include "crypto/encryption.h"
+#include "storage/object_io.h"
 
 #define PBKDF2_ITERATIONS 400000
 #define PATH_MAX_LEN 4096
@@ -25,7 +27,6 @@ static int generate_random(void* buf, size_t len)
 {
     return RAND_bytes((unsigned char*)buf, (int)len) == 1;
 }
-
 
 
 UserStore* user_store_create(size_t initial_capacity)
@@ -138,6 +139,12 @@ void user_store_get_username(UserStore* store, const unsigned char user_id[16], 
     }
 }
 
+static int write_users_v1_body(FILE* f, UserStore* store)
+{
+    const FormatVtable* fmt = lookup_format(X2S_FORMAT_VERSION_1);
+    return fmt && fmt->write_users && fmt->write_users(f, store);
+}
+
 int user_store_save(UserStore* store, const char* path)
 {
     char file_path[PATH_MAX_LEN + 16];
@@ -145,10 +152,6 @@ int user_store_save(UserStore* store, const char* path)
 
     snprintf(file_path, sizeof(file_path), "%s/__users", path);
     snprintf(tmp_path, sizeof(tmp_path), "%s/__users.tmp", path);
-
-    const FormatVtable* fmt = latest_format();
-    if (!fmt || !fmt->write_users)
-        return 0;
 
     FILE* f = fopen(tmp_path, "wb");
     if (!f)
@@ -160,13 +163,33 @@ int user_store_save(UserStore* store, const char* path)
         return 0;
     }
 
-    if (!fmt->write_users(f, store)) {
-        fclose(f);
-        remove(tmp_path);
-        return 0;
+    int ok;
+    if (encryption_is_active()) {
+        char*  body     = NULL;
+        size_t body_len = 0;
+        FILE*  buf      = open_memstream(&body, &body_len);
+        if (!buf) {
+            fclose(f);
+            remove(tmp_path);
+            return 0;
+        }
+        ok = write_users_v1_body(buf, store);
+        fclose(buf);
+
+        if (ok)
+            ok = write_encrypted_body(f, (unsigned char*)body, body_len);
+        free(body);
+    } else {
+        const FormatVtable* fmt = latest_format();
+        ok                      = fmt && fmt->write_users && fmt->write_users(f, store);
     }
 
     fclose(f);
+
+    if (!ok) {
+        remove(tmp_path);
+        return 0;
+    }
 
     if (rename(tmp_path, file_path) != 0) {
         remove(tmp_path);
@@ -190,6 +213,23 @@ int user_store_load(UserStore* store, const char* path)
     if (hret == -1) {
         fclose(f);
         return -1;
+    }
+
+    if (version == X2S_FORMAT_VERSION_2) {
+        if (!encryption_is_active()) {
+            fclose(f);
+            return -1;
+        }
+        DecryptedStream ds = decrypt_file_to_mem(f);
+        fclose(f);
+        if (!ds.stream)
+            return -1;
+
+        const FormatVtable* fmt = lookup_format(X2S_FORMAT_VERSION_1);
+        store->count            = 0;
+        int ok                  = fmt && fmt->read_users && fmt->read_users(ds.stream, store);
+        close_decrypted_stream(&ds);
+        return ok ? 1 : -1;
     }
 
     const FormatVtable* fmt = lookup_format(version);
