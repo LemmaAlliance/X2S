@@ -6,12 +6,16 @@
 #include "core/object_types.h"
 #include "server/mime_types.h"
 #include "server/http_utils.h"
+#include "server/rate_limiter.h"
 #include "storage/object_io.h"
 #include <microhttpd.h>
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
 #include <strings.h>
+#include <sys/socket.h>
+#include <netinet/in.h>
+#include <arpa/inet.h>
 
 /* CORS support */
 
@@ -823,14 +827,58 @@ static enum MHD_Result handle_share(struct MHD_Connection* conn, ApiServer* serv
 
 /* Main MHD access callback — router */
 
+static int is_auth_route(const char* url)
+{
+    return strncmp(url, "/auth/", 6) == 0;
+}
+
+static const char* client_ip_from_connection(struct MHD_Connection* conn)
+{
+    const union MHD_ConnectionInfo* ci =
+        MHD_get_connection_info(conn, MHD_CONNECTION_INFO_CLIENT_ADDRESS);
+    if (!ci || !ci->client_addr)
+        return NULL;
+
+    if (ci->client_addr->sa_family == AF_INET) {
+        struct sockaddr_in* sin = (struct sockaddr_in*)ci->client_addr;
+        return inet_ntoa(sin->sin_addr);
+    }
+
+    return NULL;
+}
+
+static enum MHD_Result rate_limit_check(struct MHD_Connection* conn, ApiServer* server,
+                                        const char* url)
+{
+    RateLimiter* limiter = is_auth_route(url) ? server->auth_limiter : server->api_limiter;
+    if (!limiter)
+        return MHD_YES;
+
+    const char* client_ip = client_ip_from_connection(conn);
+    if (!client_ip)
+        return MHD_YES;
+
+    if (!rate_limiter_allow(limiter, client_ip))
+        return send_error_cors(conn, server->cors_origin, MHD_HTTP_TOO_MANY_REQUESTS,
+                               "rate limit exceeded");
+
+    return MHD_YES;
+}
+
 static enum MHD_Result access_handler(void* cls, struct MHD_Connection* conn, const char* url,
-                                      const char* method, const char* version,
-                                      const char* upload_data, size_t* upload_data_size,
-                                      void** con_cls)
+                                       const char* method, const char* version,
+                                       const char* upload_data, size_t* upload_data_size,
+                                       void** con_cls)
 {
     (void)version;
 
     ApiServer* server = cls;
+
+    if (strcmp(method, "OPTIONS") != 0 && !*con_cls) {
+        enum MHD_Result rl = rate_limit_check(conn, server, url);
+        if (rl != MHD_YES)
+            return rl;
+    }
 
     if (strcmp(method, "OPTIONS") == 0) {
         struct MHD_Response* resp =
@@ -949,7 +997,9 @@ static void request_completed(void* cls, struct MHD_Connection* conn, void** con
 /* Public API */
 
 ApiServer* api_server_start(unsigned int port, const char* cors_origin,
-                            const char* temporary_directory, ObjectStore* store, TokenStore* tokens)
+                            const char* temporary_directory, ObjectStore* store,
+                            TokenStore* tokens, const RateLimitConfig* api_rate_limit,
+                            const RateLimitConfig* auth_rate_limit)
 {
     if (!store)
         return NULL;
@@ -960,20 +1010,37 @@ ApiServer* api_server_start(unsigned int port, const char* cors_origin,
 
     server->store               = store;
     server->tokens              = tokens;
-    server->cors_origin         = cors_origin; /* Track dynamic value safely here */
+    server->cors_origin         = cors_origin;
     server->temporary_directory = temporary_directory;
+    server->api_limiter         = NULL;
+    server->auth_limiter        = NULL;
 
-    /*
-   * MHD_USE_INTERNAL_POLLING_THREAD: MHD manages its own thread so
-   * the caller doesn't need to drive a select/epoll loop.
-   * MHD_USE_ERROR_LOG: write MHD-internal errors to stderr.
-   */
+    if (api_rate_limit) {
+        RateLimitZoneConfig zone = {
+            .capacity            = api_rate_limit->capacity,
+            .refill_rate         = api_rate_limit->refill_rate,
+            .refill_interval_ms  = api_rate_limit->refill_interval_ms,
+        };
+        server->api_limiter = rate_limiter_create(zone, api_rate_limit->bucket_count);
+    }
+
+    if (auth_rate_limit) {
+        RateLimitZoneConfig zone = {
+            .capacity            = auth_rate_limit->capacity,
+            .refill_rate         = auth_rate_limit->refill_rate,
+            .refill_interval_ms  = auth_rate_limit->refill_interval_ms,
+        };
+        server->auth_limiter = rate_limiter_create(zone, auth_rate_limit->bucket_count);
+    }
+
     server->daemon =
         MHD_start_daemon(MHD_USE_INTERNAL_POLLING_THREAD | MHD_USE_ERROR_LOG, (uint16_t)port, NULL,
                          NULL, access_handler, server, MHD_OPTION_NOTIFY_COMPLETED,
                          request_completed, NULL, MHD_OPTION_END);
 
     if (!server->daemon) {
+        rate_limiter_destroy(server->api_limiter);
+        rate_limiter_destroy(server->auth_limiter);
         free(server);
         return NULL;
     }
@@ -986,5 +1053,7 @@ void api_server_stop(ApiServer* server)
     if (!server)
         return;
     MHD_stop_daemon(server->daemon);
+    rate_limiter_destroy(server->api_limiter);
+    rate_limiter_destroy(server->auth_limiter);
     free(server);
 }

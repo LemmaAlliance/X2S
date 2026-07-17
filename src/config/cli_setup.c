@@ -145,6 +145,51 @@ int cli_setup_read_config(FILE* input, CliConfig* config)
         }
     }
 
+    /* rate_limit */
+    {
+        cJSON* rl = cJSON_GetObjectItemCaseSensitive(root, "rate_limit");
+        if (cJSON_IsObject(rl)) {
+            cJSON* enabled = cJSON_GetObjectItemCaseSensitive(rl, "enabled");
+            if (cJSON_IsBool(enabled))
+                config->rate_limit_enabled = cJSON_IsTrue(enabled);
+
+            config->rate_limit_api.bucket_count     = 1024;
+            config->rate_limit_auth.bucket_count    = 256;
+
+            cJSON* api_zone = cJSON_GetObjectItemCaseSensitive(rl, "api");
+            if (cJSON_IsObject(api_zone)) {
+                cJSON* cap = cJSON_GetObjectItemCaseSensitive(api_zone, "capacity");
+                if (cJSON_IsNumber(cap))
+                    config->rate_limit_api.capacity = (size_t)cap->valueint;
+                cJSON* rate = cJSON_GetObjectItemCaseSensitive(api_zone, "refill_rate");
+                if (cJSON_IsNumber(rate))
+                    config->rate_limit_api.refill_rate = (size_t)rate->valueint;
+                cJSON* interval = cJSON_GetObjectItemCaseSensitive(api_zone, "refill_interval_ms");
+                if (cJSON_IsNumber(interval))
+                    config->rate_limit_api.refill_interval_ms = (unsigned)interval->valueint;
+                cJSON* bc = cJSON_GetObjectItemCaseSensitive(api_zone, "bucket_count");
+                if (cJSON_IsNumber(bc))
+                    config->rate_limit_api.bucket_count = (size_t)bc->valueint;
+            }
+
+            cJSON* auth_zone = cJSON_GetObjectItemCaseSensitive(rl, "auth");
+            if (cJSON_IsObject(auth_zone)) {
+                cJSON* cap = cJSON_GetObjectItemCaseSensitive(auth_zone, "capacity");
+                if (cJSON_IsNumber(cap))
+                    config->rate_limit_auth.capacity = (size_t)cap->valueint;
+                cJSON* rate = cJSON_GetObjectItemCaseSensitive(auth_zone, "refill_rate");
+                if (cJSON_IsNumber(rate))
+                    config->rate_limit_auth.refill_rate = (size_t)rate->valueint;
+                cJSON* interval = cJSON_GetObjectItemCaseSensitive(auth_zone, "refill_interval_ms");
+                if (cJSON_IsNumber(interval))
+                    config->rate_limit_auth.refill_interval_ms = (unsigned)interval->valueint;
+                cJSON* bc = cJSON_GetObjectItemCaseSensitive(auth_zone, "bucket_count");
+                if (cJSON_IsNumber(bc))
+                    config->rate_limit_auth.bucket_count = (size_t)bc->valueint;
+            }
+        }
+    }
+
     cJSON_Delete(root);
     free(json);
     return 0;
@@ -166,6 +211,9 @@ int cli_setup_parse(int argc, char* const argv[], CliConfig* config)
     snprintf(config->temporary_directory, sizeof(config->temporary_directory), "%s",
              DEFAULT_TEMP_DIRECTORY);
     config->master_key[0] = '\0';
+    config->rate_limit_enabled = 0;
+    config->rate_limit_api  = (RateLimitConfig){.capacity = 100, .refill_rate = 10, .refill_interval_ms = 1000, .bucket_count = 1024};
+    config->rate_limit_auth = (RateLimitConfig){.capacity = 5, .refill_rate = 1, .refill_interval_ms = 1000, .bucket_count = 256};
 
     for (i = 1; i < argc; ++i) {
         if (strncmp(argv[i], "--config=", 9) == 0) {
