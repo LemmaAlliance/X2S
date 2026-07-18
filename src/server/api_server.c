@@ -846,7 +846,7 @@ static const char* client_ip_from_connection(struct MHD_Connection* conn)
 
     if (ci->client_addr->sa_family == AF_INET6) {
         struct sockaddr_in6* sin6 = (struct sockaddr_in6*)ci->client_addr;
-        static char buf[INET6_ADDRSTRLEN];
+        static char          buf[INET6_ADDRSTRLEN];
         return inet_ntop(AF_INET6, &sin6->sin6_addr, buf, sizeof(buf));
     }
 
@@ -872,9 +872,9 @@ static enum MHD_Result rate_limit_check(struct MHD_Connection* conn, ApiServer* 
 }
 
 static enum MHD_Result access_handler(void* cls, struct MHD_Connection* conn, const char* url,
-                                       const char* method, const char* version,
-                                       const char* upload_data, size_t* upload_data_size,
-                                       void** con_cls)
+                                      const char* method, const char* version,
+                                      const char* upload_data, size_t* upload_data_size,
+                                      void** con_cls)
 {
     (void)version;
 
@@ -1002,10 +1002,50 @@ static void request_completed(void* cls, struct MHD_Connection* conn, void** con
 
 /* Public API */
 
+static char* read_file_into_mem(const char* path, long* out_size)
+{
+    FILE* fp = fopen(path, "rb");
+    if (!fp)
+        return NULL;
+
+    if (fseek(fp, 0, SEEK_END) != 0) {
+        fclose(fp);
+        return NULL;
+    }
+
+    long size = ftell(fp);
+    if (size < 0) {
+        fclose(fp);
+        return NULL;
+    }
+
+    rewind(fp);
+
+    char* buf = malloc((size_t)size + 1);
+    if (!buf) {
+        fclose(fp);
+        return NULL;
+    }
+
+    if (fread(buf, 1, (size_t)size, fp) != (size_t)size) {
+        free(buf);
+        fclose(fp);
+        return NULL;
+    }
+
+    buf[size] = '\0';
+    fclose(fp);
+
+    if (out_size)
+        *out_size = size;
+    return buf;
+}
+
 ApiServer* api_server_start(unsigned int port, const char* cors_origin,
-                            const char* temporary_directory, ObjectStore* store,
-                            TokenStore* tokens, const RateLimitConfig* api_rate_limit,
-                            const RateLimitConfig* auth_rate_limit)
+                            const char* temporary_directory, ObjectStore* store, TokenStore* tokens,
+                            const RateLimitConfig* api_rate_limit,
+                            const RateLimitConfig* auth_rate_limit, int tls_enabled,
+                            const char* tls_cert_path, const char* tls_key_path)
 {
     if (!store)
         return NULL;
@@ -1023,26 +1063,54 @@ ApiServer* api_server_start(unsigned int port, const char* cors_origin,
 
     if (api_rate_limit) {
         RateLimitZoneConfig zone = {
-            .capacity            = api_rate_limit->capacity,
-            .refill_rate         = api_rate_limit->refill_rate,
-            .refill_interval_ms  = api_rate_limit->refill_interval_ms,
+            .capacity           = api_rate_limit->capacity,
+            .refill_rate        = api_rate_limit->refill_rate,
+            .refill_interval_ms = api_rate_limit->refill_interval_ms,
         };
         server->api_limiter = rate_limiter_create(zone, api_rate_limit->bucket_count);
     }
 
     if (auth_rate_limit) {
         RateLimitZoneConfig zone = {
-            .capacity            = auth_rate_limit->capacity,
-            .refill_rate         = auth_rate_limit->refill_rate,
-            .refill_interval_ms  = auth_rate_limit->refill_interval_ms,
+            .capacity           = auth_rate_limit->capacity,
+            .refill_rate        = auth_rate_limit->refill_rate,
+            .refill_interval_ms = auth_rate_limit->refill_interval_ms,
         };
         server->auth_limiter = rate_limiter_create(zone, auth_rate_limit->bucket_count);
     }
 
-    server->daemon =
-        MHD_start_daemon(MHD_USE_INTERNAL_POLLING_THREAD | MHD_USE_ERROR_LOG, (uint16_t)port, NULL,
-                         NULL, access_handler, server, MHD_OPTION_NOTIFY_COMPLETED,
-                         request_completed, NULL, MHD_OPTION_END);
+    char* cert_pem = NULL;
+    char* key_pem  = NULL;
+
+    if (tls_enabled) {
+        cert_pem = read_file_into_mem(tls_cert_path, NULL);
+        key_pem  = read_file_into_mem(tls_key_path, NULL);
+        if (!cert_pem || !key_pem) {
+            fprintf(stderr, "Failed to read TLS certificate or key file\n");
+            free(cert_pem);
+            free(key_pem);
+            rate_limiter_destroy(server->api_limiter);
+            rate_limiter_destroy(server->auth_limiter);
+            free(server);
+            return NULL;
+        }
+    }
+
+    if (tls_enabled) {
+        server->daemon =
+            MHD_start_daemon(MHD_USE_INTERNAL_POLLING_THREAD | MHD_USE_ERROR_LOG | MHD_USE_TLS,
+                             (uint16_t)port, NULL, NULL, access_handler, server,
+                             MHD_OPTION_HTTPS_MEM_CERT, cert_pem, MHD_OPTION_HTTPS_MEM_KEY, key_pem,
+                             MHD_OPTION_NOTIFY_COMPLETED, request_completed, NULL, MHD_OPTION_END);
+    } else {
+        server->daemon =
+            MHD_start_daemon(MHD_USE_INTERNAL_POLLING_THREAD | MHD_USE_ERROR_LOG, (uint16_t)port,
+                             NULL, NULL, access_handler, server, MHD_OPTION_NOTIFY_COMPLETED,
+                             request_completed, NULL, MHD_OPTION_END);
+    }
+
+    free(cert_pem);
+    free(key_pem);
 
     if (!server->daemon) {
         rate_limiter_destroy(server->api_limiter);

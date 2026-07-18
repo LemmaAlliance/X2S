@@ -10,19 +10,20 @@ struct RateLimiter;
 
 typedef struct ApiServer
 {
-    struct MHD_Daemon* daemon;
-    ObjectStore*       store;
-    TokenStore*        tokens;
-    const char*        cors_origin;
-    const char*        temporary_directory;
+    struct MHD_Daemon*  daemon;
+    ObjectStore*        store;
+    TokenStore*         tokens;
+    const char*         cors_origin;
+    const char*         temporary_directory;
     struct RateLimiter* api_limiter;
     struct RateLimiter* auth_limiter;
 } ApiServer;
 
 ApiServer* api_server_start(unsigned int port, const char* cors_origin,
-                            const char* temporary_directory, ObjectStore* store,
-                            TokenStore* tokens, const RateLimitConfig* api_rate_limit,
-                            const RateLimitConfig* auth_rate_limit);
+                            const char* temporary_directory, ObjectStore* store, TokenStore* tokens,
+                            const RateLimitConfig* api_rate_limit,
+                            const RateLimitConfig* auth_rate_limit, int tls_enabled,
+                            const char* tls_cert_path, const char* tls_key_path);
 
 void api_server_stop(ApiServer* server);
 

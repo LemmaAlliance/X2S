@@ -1,22 +1,27 @@
 {
-  "port": 8080,
-  "cors_origin": "*",
-  "data_directory": "./x2s_data",
-  "temporary_directory": "/tmp/x2s",
-  "master_key": "",
-  "rate_limit": {
-    "enabled": true,
-    "api": {
-      "capacity": 100,
-      "refill_rate": 10,
-      "refill_interval_ms": 1000,
-      "bucket_count": 1024
+    "port": 8080,
+    "cors_origin": "*",
+    "data_directory": "./x2s_data",
+    "temporary_directory": "/tmp/x2s",
+    "master_key": "",
+    "tls": {
+        "enabled": false,
+        "certificate": "/etc/x2s/cert.pem",
+        "key": "/etc/x2s/key.pem"
     },
-    "auth": {
-      "capacity": 5,
-      "refill_rate": 1,
-      "refill_interval_ms": 1000,
-      "bucket_count": 256
+    "rate_limit": {
+        "enabled": true,
+        "api": {
+            "capacity": 100,
+            "refill_rate": 10,
+            "refill_interval_ms": 1000,
+            "bucket_count": 1024
+        },
+        "auth": {
+            "capacity": 5,
+            "refill_rate": 1,
+            "refill_interval_ms": 1000,
+            "bucket_count": 256
+        }
     }
-  }
 }
