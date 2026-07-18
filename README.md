@@ -27,6 +27,7 @@ Allowed CORS Origin: *
 Data directory: ./x2s_data
 Temporary directory: /tmp/x2s
 Encryption at rest: disabled
+TLS: disabled
   POST  /auth/register      register a new user
   POST  /auth/login          authenticate and get a token
   POST  /auth/refresh        refresh an expired token
@@ -196,7 +197,7 @@ All errors return JSON:
 All persistent storage files live in `./x2s_data/` and adhere to a split model layout:
 
 * **Metadata Tracking Files (`./x2s_data/<object_id>`)**: Named by a 64-character hex hash that is unique per user upload. The binary layout stores data length, metadata lengths, owner ID (16 bytes), ACL structures, a **32-byte SHA-256 pointer hash of the data content block**, user metadata strings, and arbitrary key-value metadata pairs from `X-Metadata-*` headers.
-* **Shared Data Blobs (`./x2s_data/data_<data_hash>`)**: Named with a `data_` prefix followed by the 64-character hex hash of the *raw contents alone*. This file is decoupled from usernames, access tokens, and access patterns.
+* **Shared Data Blobs (`./x2s_data/data_<data_hash>`)**: Named with a `data_` prefix followed by the 64-character hex hash of the *raw contents alone*. This file is decoupled from usernames, access tokens, and access patterns. Data is read directly from disk on download and streamed to a temporary file on upload — blobs are never held in memory beyond the I/O operation.
 * **In-memory index**: A chained hash table (FNV-1a) maps object tracking IDs to lightweight entries. Resizes when load factor exceeds 0.75. Persisted atomically (temp file + rename) to `./x2s_data/__index`. Modifying object ACLs rewrites the associated object metadata file and updates this volatile cache.
 * **User accounts**: Stored as binary at `./x2s_data/__users`. Survive server restarts.
 * **Refresh tokens**: Stored as binary at `./x2s_data/__refresh_tokens`. Survive server restarts. Access tokens are HMAC-signed and ephemeral (lost on restart).
@@ -288,6 +289,9 @@ X2S can be configured via a JSON config file using the `--config` flag:
 | `data_directory` | `./x2s_data` | Persistent storage directory |
 | `temporary_directory` | `/tmp/x2s` | Temporary upload directory |
 | `master_key` | `""` | 64-hex-char 256-bit key for AES-256-GCM encryption at rest |
+| `tls.enabled` | `false` | Enable HTTPS using the provided PEM certificate |
+| `tls.certificate` | `""` | Path to PEM-encoded TLS certificate file |
+| `tls.key` | `""` | Path to PEM-encoded TLS private key file |
 | `rate_limit.enabled` | `false` | Enable or disable rate limiting |
 | `rate_limit.api.capacity` | `100` | Max burst capacity for general API requests |
 | `rate_limit.api.refill_rate` | `10` | Tokens replenished per refill interval |
@@ -298,7 +302,7 @@ X2S can be configured via a JSON config file using the `--config` flag:
 | `rate_limit.auth.refill_interval_ms` | `1000` | Refill interval in milliseconds |
 | `rate_limit.auth.bucket_count` | `256` | Hash table size for client IP tracking |
 
-See `config.example.json` for a full example. All fields are optional. The master key can also be set via the `X2S_MASTER_KEY` environment variable.
+See `config.example.json` for a full example. All fields are optional. The master key can also be set via the `X2S_MASTER_KEY` environment variable. TLS certificate and key paths can alternatively be set via the `X2S_TLS_CERT` and `X2S_TLS_KEY` environment variables respectively.
 
 ### Rate limiting
 
@@ -330,17 +334,33 @@ X2S has a built-in token bucket rate limiter with separate zones for general API
 - OPTIONS (CORS preflight) requests are not rate-limited.
 - Rate limiting is disabled by default.
 
+## TLS
+
+X2S supports optional HTTPS via PEM-encoded certificate and key files. When enabled, the server listens on the same port but with TLS encryption.
+
+```json
+{
+  "tls": {
+    "enabled": true,
+    "certificate": "/etc/x2s/cert.pem",
+    "key": "/etc/x2s/key.pem"
+  }
+}
+```
+
+The `certificate` field also accepts the shorthand key `cert`, and `key` also accepts `private_key`. On startup the server prints `TLS: enabled` and uses an `https://` URL.
+
 ## Design notes
 
 * **Single-threaded** — libmicrohttpd's internal polling thread handles all I/O. The rate limiter is protected by a mutex for thread safety.
-* **No TLS** — intended for trusted/internal networks. **It is highly recommended to pair this with a reverse proxy like Nginx**.
+* **TLS** — optional HTTPS via PEM certificate and key files. See [TLS configuration](#tls).
 * **Content-addressed & Deduplicated** — payload contents are identified via unique data hashes. Multiple metadata targets reference identical chunks on disk, achieving file deduplication across users while preserving access control sandboxing.
 * **Metadata query discovery** — indexes user spaces globally in real-time by crawling local hash-node buckets to enforce precise sandbox filtering constraints quickly.
 * **Constant-time comparisons** — password hashes and tokens are compared with `CRYPTO_memcmp` to mitigate timing attacks.
 * **Encryption at rest** — optional AES-256-GCM transparent encryption of all on-disk data via a configurable master key.
 * **Token expiry** — access tokens expire after 15 minutes (self-validating HMAC, no storage needed). Refresh tokens expire after 7 days and are persisted to disk. A small in-memory revocation list handles manually logged-out access tokens; expired entries are purged every 100ms.
 * **Maximum password length** — 1024 bytes.
-* **Maximum object size** — no hard limit; uploads are streamed directly to a temporary file on disk, then loaded into memory for storage. Practical limit is available RAM.
+* **Disk-backed I/O** — uploads are streamed chunk-by-chunk to a temporary file on disk (never buffered in RAM during reception). Downloads read data directly from the blob file on disk and hand it to the HTTP client. Blob contents are rarely held entirely in memory — the primary limit is disk space, not RAM.
 * **Rate limiting** — built-in token bucket rate limiter with separate API and auth zones. Disabled by default. See [Rate limiting](#rate-limiting) for configuration.
 
 ## Storage format & migration
