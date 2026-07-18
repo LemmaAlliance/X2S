@@ -370,7 +370,7 @@ All on-disk files (`__users`, `__index`, per-object metadata files, and data blo
 ```
 offset  size  field
 ------  ----  ---------------------
-     0     2  magic bytes: 'X' '2'
+      0     2  magic bytes: 'X' '2'
       2     1  file type: 1=metadata, 2=index, 3=users, 4=data blob, 5=refresh tokens
       3     1  format version
 ```
