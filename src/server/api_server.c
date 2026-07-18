@@ -871,6 +871,29 @@ static enum MHD_Result rate_limit_check(struct MHD_Connection* conn, ApiServer* 
     return MHD_YES;
 }
 
+static enum MHD_Result handle_health(struct MHD_Connection* conn, ApiServer* server)
+{
+    time_t now = time(NULL);
+    double uptime = difftime(now, server->start_time);
+
+    char body[128];
+    int n = snprintf(body, sizeof(body), "{\"status\":\"ok\",\"uptime_seconds\":%.0f}", uptime);
+    if (n < 0 || (size_t)n >= sizeof(body))
+        return send_error_cors(conn, server->cors_origin, MHD_HTTP_INTERNAL_SERVER_ERROR,
+                               "internal error");
+
+    struct MHD_Response* resp =
+        MHD_create_response_from_buffer((size_t)n, body, MHD_RESPMEM_MUST_COPY);
+    if (!resp)
+        return MHD_NO;
+
+    MHD_add_response_header(resp, "Content-Type", "application/json");
+    add_cors_headers(resp, server->cors_origin);
+    enum MHD_Result ret = MHD_queue_response(conn, MHD_HTTP_OK, resp);
+    MHD_destroy_response(resp);
+    return ret;
+}
+
 static enum MHD_Result access_handler(void* cls, struct MHD_Connection* conn, const char* url,
                                       const char* method, const char* version,
                                       const char* upload_data, size_t* upload_data_size,
@@ -955,6 +978,13 @@ static enum MHD_Result access_handler(void* cls, struct MHD_Connection* conn, co
 
         return send_error_cors(conn, server->cors_origin, MHD_HTTP_METHOD_NOT_ALLOWED,
                                "only GET and DELETE are accepted on /objects/<id>");
+    }
+
+    if (strcmp(url, "/health") == 0) {
+        if (strcmp(method, "GET") == 0)
+            return handle_health(conn, server);
+        return send_error_cors(conn, server->cors_origin, MHD_HTTP_METHOD_NOT_ALLOWED,
+                               "only GET is accepted on /health");
     }
 
     return send_error_cors(conn, server->cors_origin, MHD_HTTP_NOT_FOUND, "unknown route");
@@ -1058,6 +1088,7 @@ ApiServer* api_server_start(unsigned int port, const char* cors_origin,
     server->tokens              = tokens;
     server->cors_origin         = cors_origin;
     server->temporary_directory = temporary_directory;
+    server->start_time          = time(NULL);
     server->api_limiter         = NULL;
     server->auth_limiter        = NULL;
 

@@ -1,6 +1,8 @@
 #ifndef API_SERVER_H
 #define API_SERVER_H
 
+#include <time.h>
+
 #include "core/object_types.h"
 #include "auth/auth.h"
 #include "config/config_parser.h"
@@ -17,6 +19,7 @@ typedef struct ApiServer
     const char*         temporary_directory;
     struct RateLimiter* api_limiter;
     struct RateLimiter* auth_limiter;
+    time_t              start_time;
 } ApiServer;
 
 ApiServer* api_server_start(unsigned int port, const char* cors_origin,
