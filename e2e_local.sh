@@ -15,8 +15,10 @@ echo "=== Create Account ==="
 RESPONSE=$(curl -s -f -X POST http://localhost:8080/auth/register -d 'username=alice&password=foobar')
 
 AUTH_TOKEN=$(echo "$RESPONSE" | jq -r '.token')
+REFRESH_TOKEN=$(echo "$RESPONSE" | jq -r '.refresh_token')
 
-echo "The token is: ${AUTH_TOKEN}"
+echo "The token is: ${AUTH_TOKEN:0:20}..."
+echo "The refresh token is: ${REFRESH_TOKEN:0:20}..."
 
 echo "=== Login with invalid user ==="
 ! curl -s -f -X POST http://localhost:8080/auth/login -d 'username=alice&password=bazquux'
@@ -97,3 +99,21 @@ ID=$(echo "${UPLOAD_RESPONSE}" | jq -r '.id')
 ! curl -s -f -X GET "http://localhost:8080/objects/$ID" \
 -H "Authorization: Bearer ${AUTH_TOKEN}"
 echo "Unable to access object (this is good)."
+
+echo "=== Refresh token ==="
+REFRESH_RESPONSE=$(curl -s -f -X POST http://localhost:8080/auth/refresh \
+-d "refresh_token=${REFRESH_TOKEN}")
+NEW_AUTH_TOKEN=$(echo "$REFRESH_RESPONSE" | jq -r '.token')
+NEW_REFRESH_TOKEN=$(echo "$REFRESH_RESPONSE" | jq -r '.refresh_token')
+echo "Token refreshed."
+
+echo "=== Access object with refreshed token ==="
+ID=$(echo "${UPLOAD_RESPONSE}" | jq -r '.id')
+curl -s -f -X GET "http://localhost:8080/objects/$ID" \
+-H "Authorization: Bearer ${NEW_AUTH_TOKEN}"
+echo "Accessed object with refreshed token."
+
+echo "=== Old refresh token is invalid after rotation ==="
+! curl -s -f -X POST http://localhost:8080/auth/refresh \
+-d "refresh_token=${REFRESH_TOKEN}"
+echo "Old refresh token rejected (this is good)."

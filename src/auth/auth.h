@@ -15,7 +15,6 @@
 
 #define SALT_SIZE 16
 #define HASH_SIZE 32
-#define TOKEN_SIZE 32
 #define MAX_USERNAME 63
 #define MAX_PASSWORD 1024
 
@@ -34,24 +33,15 @@ typedef struct UserStore
     size_t       capacity;
 } UserStore;
 
-typedef struct
-{
-    unsigned char token[TOKEN_SIZE];
-    unsigned char user_id[16];
-    time_t        expiry;
-} Session;
-
-typedef struct
-{
-    Session* sessions;
-    size_t   count;
-    size_t   capacity;
-} SessionStore;
+typedef struct RefreshTokenStore RefreshTokenStore;
+typedef struct RevocationStore RevocationStore;
 
 typedef struct TokenStore
 {
-    UserStore*    users;
-    SessionStore* sessions;
+    UserStore*         users;
+    RefreshTokenStore* refresh_tokens;
+    RevocationStore*   revoked_access;
+    unsigned char      hmac_key[32];
 } TokenStore;
 
 UserStore* user_store_create(size_t initial_capacity);
@@ -65,16 +55,7 @@ void       user_store_get_username(UserStore* store, const unsigned char user_id
 int        user_store_save(UserStore* store, const char* path);
 int        user_store_load(UserStore* store, const char* path);
 
-SessionStore* session_store_create(size_t initial_capacity);
-void          session_store_free(SessionStore* store);
-char*         session_create(SessionStore* store, const unsigned char user_id[16]);
-int           session_lookup(SessionStore* store, const unsigned char token[TOKEN_SIZE],
-                             unsigned char user_id_out[16]);
-void          session_destroy(SessionStore* store, const unsigned char token[TOKEN_SIZE]);
-
 void hash_password(const char* password, const unsigned char salt[SALT_SIZE],
                    unsigned char out[HASH_SIZE]);
-
-void check_token_expiry(SessionStore* store);
 
 #endif

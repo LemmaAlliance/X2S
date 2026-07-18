@@ -29,7 +29,8 @@ Temporary directory: /tmp/x2s
 Encryption at rest: disabled
   POST  /auth/register      register a new user
   POST  /auth/login          authenticate and get a token
-  POST  /auth/logout         invalidate a token
+  POST  /auth/refresh        refresh an expired token
+  POST  /auth/logout         invalidate tokens
   POST  /objects             upload an object
   GET   /objects             list owned objects
   GET   /objects/<id>        retrieve an object
@@ -45,23 +46,36 @@ Press Ctrl-C to stop.
 
 Register a user and obtain a bearer token. All authentication endpoints use `application/x-www-form-urlencoded` bodies.
 
+#### Token types
+
+| Token | Format | Expiry | Storage |
+| --- | --- | --- | --- |
+| **Access token** | HMAC-SHA256 signed `base64url(payload).base64url(signature)` | 15 min | Self-validating (not stored) |
+| **Refresh token** | 64-char hex (32 random bytes) | 7 days | Persisted to `__refresh_tokens` on disk, rotated on each use |
+
 ```bash
 # register
 curl -X POST http://localhost:8080/auth/register \
   -d 'username=alice&password=secret123'
-# → {"token":"<64-hex>","user_id":"<32-hex>"}
+# → {"token":"<access>","refresh_token":"<refresh>","user_id":"<32-hex>"}
 
 # login
 curl -X POST http://localhost:8080/auth/login \
   -d 'username=alice&password=secret123'
-# → {"token":"<64-hex>","user_id":"<32-hex>"}
+# → {"token":"<access>","refresh_token":"<refresh>","user_id":"<32-hex>"}
 
-# logout
+# refresh an expired access token (rotates the refresh token)
+curl -X POST http://localhost:8080/auth/refresh \
+  -d 'refresh_token=<refresh>'
+# → {"token":"<access>","refresh_token":"<refresh>","user_id":"<32-hex>"}
+
+# logout (optionally revoke refresh token too)
 curl -X POST http://localhost:8080/auth/logout \
-  -H 'Authorization: Bearer <token>'
+  -H 'Authorization: Bearer <access>' \
+  -d 'refresh_token=<refresh>'
 ```
 
-Passwords are hashed with **PBKDF2-HMAC-SHA256** (400,000 iterations, random 16-byte salt, max 1024 bytes). The server stores only the salted hash — never the plaintext password. Password hashes and session tokens are compared using **constant-time** (`CRYPTO_memcmp`) to prevent timing side-channel attacks.
+Passwords are hashed with **PBKDF2-HMAC-SHA256** (400,000 iterations, random 16-byte salt, max 1024 bytes). The server stores only the salted hash — never the plaintext password. Password hashes and tokens are compared using **constant-time** (`CRYPTO_memcmp`) to prevent timing side-channel attacks.
 
 ### Health check
 
@@ -184,7 +198,8 @@ All persistent storage files live in `./x2s_data/` and adhere to a split model l
 * **Metadata Tracking Files (`./x2s_data/<object_id>`)**: Named by a 64-character hex hash that is unique per user upload. The binary layout stores data length, metadata lengths, owner ID (16 bytes), ACL structures, a **32-byte SHA-256 pointer hash of the data content block**, user metadata strings, and arbitrary key-value metadata pairs from `X-Metadata-*` headers.
 * **Shared Data Blobs (`./x2s_data/data_<data_hash>`)**: Named with a `data_` prefix followed by the 64-character hex hash of the *raw contents alone*. This file is decoupled from usernames, access tokens, and access patterns.
 * **In-memory index**: A chained hash table (FNV-1a) maps object tracking IDs to lightweight entries. Resizes when load factor exceeds 0.75. Persisted atomically (temp file + rename) to `./x2s_data/__index`. Modifying object ACLs rewrites the associated object metadata file and updates this volatile cache.
-* **User accounts**: Stored as binary at `./x2s_data/__users`. Survive server restarts. Sessions are ephemeral and lost on restart (re-login required).
+* **User accounts**: Stored as binary at `./x2s_data/__users`. Survive server restarts.
+* **Refresh tokens**: Stored as binary at `./x2s_data/__refresh_tokens`. Survive server restarts. Access tokens are HMAC-signed and ephemeral (lost on restart).
 * **Atomic writes**: Both the object index and user database use a write-then-rename strategy to prevent corruption on crash.
 * **Encryption at rest**: When a master key is configured, all on-disk files are transparently encrypted with AES-256-GCM (format version 2). See [Encryption at rest](#encryption-at-rest).
 
@@ -321,9 +336,9 @@ X2S has a built-in token bucket rate limiter with separate zones for general API
 * **No TLS** — intended for trusted/internal networks. **It is highly recommended to pair this with a reverse proxy like Nginx**.
 * **Content-addressed & Deduplicated** — payload contents are identified via unique data hashes. Multiple metadata targets reference identical chunks on disk, achieving file deduplication across users while preserving access control sandboxing.
 * **Metadata query discovery** — indexes user spaces globally in real-time by crawling local hash-node buckets to enforce precise sandbox filtering constraints quickly.
-* **Constant-time comparisons** — password hashes and session tokens are compared with `CRYPTO_memcmp` to mitigate timing attacks.
+* **Constant-time comparisons** — password hashes and tokens are compared with `CRYPTO_memcmp` to mitigate timing attacks.
 * **Encryption at rest** — optional AES-256-GCM transparent encryption of all on-disk data via a configurable master key.
-* **Token expiry** — sessions expire after 30 minutes of inactivity. Expired tokens are checked every 100ms via a linear scan (O(n); a linked list or timer wheel is planned for the future).
+* **Token expiry** — access tokens expire after 15 minutes (self-validating HMAC, no storage needed). Refresh tokens expire after 7 days and are persisted to disk. A small in-memory revocation list handles manually logged-out access tokens; expired entries are purged every 100ms.
 * **Maximum password length** — 1024 bytes.
 * **Maximum object size** — no hard limit; uploads are streamed directly to a temporary file on disk, then loaded into memory for storage. Practical limit is available RAM.
 * **Rate limiting** — built-in token bucket rate limiter with separate API and auth zones. Disabled by default. See [Rate limiting](#rate-limiting) for configuration.
@@ -336,8 +351,8 @@ All on-disk files (`__users`, `__index`, per-object metadata files, and data blo
 offset  size  field
 ------  ----  ---------------------
      0     2  magic bytes: 'X' '2'
-     2     1  file type: 1=metadata, 2=index, 3=users, 4=data blob
-     3     1  format version
+      2     1  file type: 1=metadata, 2=index, 3=users, 4=data blob, 5=refresh tokens
+      3     1  format version
 ```
 
 | Version | Description |

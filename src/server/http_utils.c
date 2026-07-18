@@ -4,6 +4,7 @@
 #include <stdio.h>
 #include <stdlib.h>
 #include "auth/auth.h"
+#include "auth/token.h"
 #include "core/hex_utils.h"
 #include "core/object_types.h"
 #include "server/http_utils.h"
@@ -102,23 +103,19 @@ void get_user_from_request(struct MHD_Connection* conn, User* user, TokenStore* 
 
     const char* auth = MHD_lookup_connection_value(conn, MHD_HEADER_KIND, "Authorization");
 
-    if (auth) {
-        if (strncmp(auth, "Bearer ", 7) == 0 && tokens) {
-            const char* hex_token = auth + 7;
-            if (strlen(hex_token) == TOKEN_SIZE * 2) {
-                unsigned char token_bin[TOKEN_SIZE];
-                if (hex_to_bytes(hex_token, token_bin, TOKEN_SIZE)) {
-                    unsigned char user_id_bin[16];
-                    if (session_lookup(tokens->sessions, token_bin, user_id_bin)) {
-                        memcpy(user->user_id, user_id_bin, 16);
-                        user_store_get_username(tokens->users, user_id_bin, user->username,
-                                                sizeof(user->username));
-                        return;
-                    }
-                }
-            }
+    if (auth && strncmp(auth, "Bearer ", 7) == 0 && tokens) {
+        const char* access_token = auth + 7;
+        if (strlen(access_token) == 0)
+            return;
+
+        if (revocation_store_is_revoked(tokens->revoked_access, access_token))
+            return;
+
+        unsigned char user_id_bin[16];
+        if (access_token_verify(tokens->hmac_key, access_token, user_id_bin)) {
+            memcpy(user->user_id, user_id_bin, 16);
+            user_store_get_username(tokens->users, user_id_bin, user->username,
+                                    sizeof(user->username));
         }
     }
-
-    return;
 }

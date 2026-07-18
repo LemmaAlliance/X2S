@@ -55,6 +55,8 @@ add_executable(x2s
     src/core/hex_utils.c
     src/server/api_server.c
     src/auth/auth.c
+    src/auth/token.c
+    src/auth/refresh_token.c
     src/config/cli_setup.c
     src/format/format_v1.c
     src/format/format_v2.c
