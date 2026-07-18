@@ -57,6 +57,7 @@ add_executable(x2s
     src/auth/auth.c
     src/config/cli_setup.c
     src/format/format_v1.c
+    src/format/format_v2.c
     src/storage/object_repository.c
     src/storage/object_permissions.c
     src/storage/object_index.c
@@ -86,6 +87,7 @@ add_executable(x2s-migrate
     src/core/hex_utils.c
     src/auth/auth.c
     src/format/format_v1.c
+    src/format/format_v2.c
     src/storage/object_io.c
     src/crypto/object_crypto.c
     src/crypto/encryption.c

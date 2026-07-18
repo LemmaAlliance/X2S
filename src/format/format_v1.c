@@ -2,6 +2,7 @@
 #include "auth/auth.h"
 #include "core/format.h"
 #include "core/format_registry.h"
+#include "format/format_v2.h"
 #include "storage/object_serialization.h"
 #include "storage/object_io.h"
 
@@ -277,6 +278,8 @@ const FormatVtable format_registry[] = {
      read_data_hash_body},
     {1, "v1", read_metadata_body, write_metadata_body, read_index_body, write_index_body,
      read_users_body, write_users_body, read_data_hash_body},
+    {2, "v2", read_metadata_v2, write_metadata_v2, read_index_v2, write_index_v2,
+     read_users_v2, write_users_v2, read_data_hash_v2},
 };
 
 const size_t format_registry_count = sizeof(format_registry) / sizeof(format_registry[0]);

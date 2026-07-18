@@ -139,12 +139,6 @@ void user_store_get_username(UserStore* store, const unsigned char user_id[16], 
     }
 }
 
-static int write_users_v1_body(FILE* f, UserStore* store)
-{
-    const FormatVtable* fmt = lookup_format(X2S_FORMAT_VERSION_1);
-    return fmt && fmt->write_users && fmt->write_users(f, store);
-}
-
 int user_store_save(UserStore* store, const char* path)
 {
     char file_path[PATH_MAX_LEN + 16];
@@ -163,26 +157,9 @@ int user_store_save(UserStore* store, const char* path)
         return 0;
     }
 
-    int ok;
-    if (encryption_is_active()) {
-        char*  body     = NULL;
-        size_t body_len = 0;
-        FILE*  buf      = open_memstream(&body, &body_len);
-        if (!buf) {
-            fclose(f);
-            remove(tmp_path);
-            return 0;
-        }
-        ok = write_users_v1_body(buf, store);
-        fclose(buf);
-
-        if (ok)
-            ok = write_encrypted_body(f, (unsigned char*)body, body_len);
-        free(body);
-    } else {
-        const FormatVtable* fmt = latest_format();
-        ok                      = fmt && fmt->write_users && fmt->write_users(f, store);
-    }
+    uint8_t             wver = encryption_is_active() ? X2S_FORMAT_VERSION_2 : X2S_FORMAT_VERSION_1;
+    const FormatVtable* fmt  = lookup_format(wver);
+    int ok = fmt && fmt->write_users && fmt->write_users(f, store);
 
     fclose(f);
 
@@ -215,32 +192,17 @@ int user_store_load(UserStore* store, const char* path)
         return -1;
     }
 
-    if (version == X2S_FORMAT_VERSION_2) {
-        if (!encryption_is_active()) {
-            fclose(f);
-            return -1;
-        }
-        DecryptedStream ds = decrypt_file_to_mem(f);
-        fclose(f);
-        if (!ds.stream)
-            return -1;
-
-        const FormatVtable* fmt = lookup_format(X2S_FORMAT_VERSION_1);
-        store->count            = 0;
-        int ok                  = fmt && fmt->read_users && fmt->read_users(ds.stream, store);
-        close_decrypted_stream(&ds);
-        return ok ? 1 : -1;
-    }
-
     const FormatVtable* fmt = lookup_format(version);
     if (!fmt || !fmt->read_users) {
         fclose(f);
-        return 0;
+        return (version == X2S_FORMAT_VERSION_2) ? -1 : 0;
     }
 
     store->count = 0;
     int ret      = fmt->read_users(f, store);
     fclose(f);
+    if (ret == 0 && version == X2S_FORMAT_VERSION_2 && !encryption_is_active())
+        return -1;
     return ret;
 }
 

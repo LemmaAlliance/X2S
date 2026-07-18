@@ -26,9 +26,8 @@ static int is_target_version(uint8_t version)
     return version == target;
 }
 
-static int do_migrate(const char* path, uint8_t file_type, const FormatVtable* reader_fmt,
-                      migrate_read_fn reader, migrate_write_fn writer, migrate_free_fn freer,
-                      void* ctx)
+static int do_migrate(const char* path, uint8_t file_type, migrate_read_fn reader,
+                      migrate_write_fn writer, migrate_free_fn freer, void* ctx)
 {
     FILE* f = fopen(path, "rb");
     if (!f)
@@ -41,23 +40,14 @@ static int do_migrate(const char* path, uint8_t file_type, const FormatVtable* r
         return -1;
     }
 
-    int ok;
-    if (on_disk_version == X2S_FORMAT_VERSION_2) {
-        if (!encryption_is_active()) {
-            fclose(f);
-            return -1;
-        }
-        DecryptedStream ds = decrypt_file_to_mem(f);
+    const FormatVtable* reader_fmt = lookup_format(on_disk_version);
+    if (!reader_fmt) {
         fclose(f);
-        if (!ds.stream)
-            return -1;
-
-        ok = reader(ds.stream, reader_fmt, ctx);
-        close_decrypted_stream(&ds);
-    } else {
-        ok = reader(f, reader_fmt, ctx);
-        fclose(f);
+        return -1;
     }
+
+    int ok = reader(f, reader_fmt, ctx);
+    fclose(f);
     if (!ok)
         return -1;
 
@@ -68,8 +58,9 @@ static int do_migrate(const char* path, uint8_t file_type, const FormatVtable* r
         return -1;
     }
 
-    const FormatVtable* body_fmt = lookup_format(X2S_FORMAT_VERSION_1);
-    f                            = fopen(path, "wb");
+    uint8_t             target_ver = encryption_is_active() ? X2S_FORMAT_VERSION_2 : X2S_FORMAT_VERSION_1;
+    const FormatVtable* writer_fmt = lookup_format(target_ver);
+    f                              = fopen(path, "wb");
     if (!f) {
         freer(ctx);
         remove(path);
@@ -77,7 +68,7 @@ static int do_migrate(const char* path, uint8_t file_type, const FormatVtable* r
         return -1;
     }
 
-    if (!try_write_header(f, file_type)) {
+    if (!try_write_header(f, file_type) || !writer_fmt) {
         fclose(f);
         remove(path);
         rename(bak_path, path);
@@ -85,39 +76,12 @@ static int do_migrate(const char* path, uint8_t file_type, const FormatVtable* r
         return -1;
     }
 
-    if (encryption_is_active()) {
-        char*  body = NULL;
-        size_t body_len = 0;
-        FILE*  buf = open_memstream(&body, &body_len);
-        if (!buf) {
-            fclose(f);
-            remove(path);
-            rename(bak_path, path);
-            freer(ctx);
-            return -1;
-        }
-        ok = writer(buf, body_fmt, ctx);
-        fclose(buf);
-
-        if (ok)
-            ok = write_encrypted_body(f, (unsigned char*)body, body_len);
-        free(body);
-
-        if (!ok) {
-            fclose(f);
-            remove(path);
-            rename(bak_path, path);
-            freer(ctx);
-            return -1;
-        }
-    } else {
-        if (!writer(f, body_fmt, ctx)) {
-            fclose(f);
-            remove(path);
-            rename(bak_path, path);
-            freer(ctx);
-            return -1;
-        }
+    if (!writer(f, writer_fmt, ctx)) {
+        fclose(f);
+        remove(path);
+        rename(bak_path, path);
+        freer(ctx);
+        return -1;
     }
     fclose(f);
 
@@ -153,10 +117,10 @@ static void metadata_freer(void* v)
     }
 }
 
-static int migrate_metadata(const char* path, const FormatVtable* from)
+static int migrate_metadata(const char* path)
 {
     struct metadata_ctx ctx = {0};
-    return do_migrate(path, X2S_FILE_TYPE_METADATA, from, metadata_reader, metadata_writer,
+    return do_migrate(path, X2S_FILE_TYPE_METADATA, metadata_reader, metadata_writer,
                       metadata_freer, &ctx);
 }
 
@@ -186,11 +150,10 @@ static void index_freer(void* v)
     free(((struct index_ctx*)v)->ids);
 }
 
-static int migrate_index(const char* path, const FormatVtable* from)
+static int migrate_index(const char* path)
 {
     struct index_ctx ctx = {0};
-    return do_migrate(path, X2S_FILE_TYPE_INDEX, from, index_reader, index_writer, index_freer,
-                      &ctx);
+    return do_migrate(path, X2S_FILE_TYPE_INDEX, index_reader, index_writer, index_freer, &ctx);
 }
 
 /* Users */
@@ -227,11 +190,10 @@ static void users_freer(void* v)
     free(((struct users_ctx*)v)->store.accounts);
 }
 
-static int migrate_users(const char* path, const FormatVtable* from)
+static int migrate_users(const char* path)
 {
     struct users_ctx ctx = {0};
-    return do_migrate(path, X2S_FILE_TYPE_USERS, from, users_reader, users_writer, users_freer,
-                      &ctx);
+    return do_migrate(path, X2S_FILE_TYPE_USERS, users_reader, users_writer, users_freer, &ctx);
 }
 
 /* Helpers */
@@ -295,8 +257,6 @@ int main(int argc, char* argv[])
     char    path[4096];
     uint8_t version = 0;
 
-    const FormatVtable* v1_fmt = lookup_format(X2S_FORMAT_VERSION_1);
-
     /* Phase 1: __index */
     snprintf(path, sizeof(path), "%s/__index", data_dir);
     FILE* f = fopen(path, "rb");
@@ -307,8 +267,8 @@ int main(int argc, char* argv[])
             fprintf(stderr, "  [skip]  %s: unknown version\n", path);
         } else if (hret == 1 && is_target_version(version)) {
             skipped_count++;
-        } else if (version == X2S_FORMAT_VERSION_2 || (v1_fmt && v1_fmt->read_index)) {
-            int ret = migrate_index(path, v1_fmt);
+        } else if (hret == 1 && lookup_format(version)) {
+            int ret = migrate_index(path);
             if (ret > 0) {
                 migrated_count++;
                 index_migrated = 1;
@@ -327,8 +287,8 @@ int main(int argc, char* argv[])
             fprintf(stderr, "  [skip]  %s: unknown version\n", path);
         } else if (hret == 1 && is_target_version(version)) {
             skipped_count++;
-        } else if (version == X2S_FORMAT_VERSION_2 || (v1_fmt && v1_fmt->read_users)) {
-            int ret = migrate_users(path, v1_fmt);
+        } else if (hret == 1 && lookup_format(version)) {
+            int ret = migrate_users(path);
             if (ret > 0) {
                 migrated_count++;
                 users_migrated = 1;
@@ -361,8 +321,8 @@ int main(int argc, char* argv[])
             fprintf(stderr, "  [skip]  %s: unknown version\n", path);
         } else if (hret == 1 && is_target_version(version)) {
             skipped_count++;
-        } else if (version == X2S_FORMAT_VERSION_2 || (v1_fmt && v1_fmt->read_metadata)) {
-            int ret = migrate_metadata(path, v1_fmt);
+        } else if (hret == 1 && lookup_format(version)) {
+            int ret = migrate_metadata(path);
             if (ret > 0) {
                 migrated_count++;
                 metadata_count++;

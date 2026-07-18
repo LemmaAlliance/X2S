@@ -98,39 +98,6 @@ void object_path(ObjectStore* store, const unsigned char id[OBJECT_ID_SIZE], cha
     snprintf(out, out_len, "%s/%s", store->store_path, hex);
 }
 
-static int write_metadata_encrypted(FILE* f, Object* obj)
-{
-    const FormatVtable* fmt = lookup_format(X2S_FORMAT_VERSION_1);
-    if (!fmt || !fmt->write_metadata)
-        return 0;
-
-    char*  body     = NULL;
-    size_t body_len = 0;
-    FILE*  buf      = open_memstream(&body, &body_len);
-    if (!buf)
-        return 0;
-
-    int ok = fmt->write_metadata(buf, obj);
-    fclose(buf);
-
-    if (ok)
-        ok = write_encrypted_body(f, (unsigned char*)body, body_len);
-    free(body);
-    return ok;
-}
-
-static int read_metadata_encrypted(FILE* f, Object* out)
-{
-    DecryptedStream ds = decrypt_file_to_mem(f);
-    if (!ds.stream)
-        return 0;
-
-    const FormatVtable* fmt = lookup_format(X2S_FORMAT_VERSION_1);
-    int                 ok  = fmt && fmt->read_metadata && fmt->read_metadata(ds.stream, out);
-    close_decrypted_stream(&ds);
-    return ok;
-}
-
 static int write_data_blob(ObjectStore* store, Object* obj)
 {
     if (obj->size == 0 || !obj->data)
@@ -181,17 +148,11 @@ int write_object_file(ObjectStore* store, Object* obj)
         return 0;
     }
 
-    if (encryption_is_active()) {
-        if (!write_metadata_encrypted(f, obj)) {
-            fclose(f);
-            return 0;
-        }
-    } else {
-        const FormatVtable* fmt = latest_format();
-        if (!fmt || !fmt->write_metadata || !fmt->write_metadata(f, obj)) {
-            fclose(f);
-            return 0;
-        }
+    uint8_t             wver = encryption_is_active() ? X2S_FORMAT_VERSION_2 : X2S_FORMAT_VERSION_1;
+    const FormatVtable* fmt  = lookup_format(wver);
+    if (!fmt || !fmt->write_metadata || !fmt->write_metadata(f, obj)) {
+        fclose(f);
+        return 0;
     }
 
     fclose(f);
@@ -281,25 +242,14 @@ int read_object_file(ObjectStore* store, const unsigned char id[OBJECT_ID_SIZE],
         return 0;
     }
 
-    if (version == X2S_FORMAT_VERSION_2) {
-        if (!encryption_is_active()) {
-            fclose(f);
-            return 0;
-        }
-        if (!read_metadata_encrypted(f, out)) {
-            fclose(f);
-            return 0;
-        }
-    } else {
-        const FormatVtable* fmt = lookup_format(version);
-        if (!fmt || !fmt->read_metadata) {
-            fclose(f);
-            return 0;
-        }
-        if (!fmt->read_metadata(f, out)) {
-            fclose(f);
-            return 0;
-        }
+    const FormatVtable* fmt = lookup_format(version);
+    if (!fmt || !fmt->read_metadata) {
+        fclose(f);
+        return 0;
+    }
+    if (!fmt->read_metadata(f, out)) {
+        fclose(f);
+        return 0;
     }
     fclose(f);
 
@@ -334,28 +284,12 @@ int read_metadata_data_hash(const char* path, unsigned char hash[OBJECT_ID_SIZE]
         return 0;
     }
 
-    int result = 0;
-
-    if (version == X2S_FORMAT_VERSION_2) {
-        if (!encryption_is_active()) {
-            fclose(f);
-            return 0;
-        }
-        DecryptedStream ds = decrypt_file_to_mem(f);
-        fclose(f);
-        if (!ds.stream)
-            return 0;
-
-        const FormatVtable* fmt = lookup_format(X2S_FORMAT_VERSION_1);
-        if (fmt && fmt->read_data_hash && fmt->read_data_hash(ds.stream, hash))
-            result = 1;
-        close_decrypted_stream(&ds);
-        return result;
-    }
-
     const FormatVtable* fmt = lookup_format(version);
-    if (fmt && fmt->read_data_hash && fmt->read_data_hash(f, hash))
-        result = 1;
+    if (!fmt || !fmt->read_data_hash) {
+        fclose(f);
+        return 0;
+    }
+    int result = fmt->read_data_hash(f, hash) ? 1 : 0;
     fclose(f);
     return result;
 }
