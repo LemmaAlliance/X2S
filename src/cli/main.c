@@ -78,8 +78,8 @@ int main(int argc, char* argv[])
     RateLimitConfig* auth_rate = config.rate_limit_enabled ? &config.rate_limit_auth : NULL;
 
     ApiServer* api =
-        api_server_start(port, cors_origin, config.temporary_directory, store, &tokens,
-                         api_rate, auth_rate);
+        api_server_start(port, cors_origin, config.temporary_directory, store, &tokens, api_rate,
+                         auth_rate, config.tls_enabled, config.tls_cert_path, config.tls_key_path);
     if (!api) {
         fprintf(stderr, "Failed to start API server on port %u\n", port);
         session_store_free(sessions);
@@ -88,11 +88,12 @@ int main(int argc, char* argv[])
         return 1;
     }
 
-    printf("Listening on http://0.0.0.0:%u\n", port);
+    printf("Listening on %s://0.0.0.0:%u\n", config.tls_enabled ? "https" : "http", port);
     printf("Allowed CORS Origin: %s\n", cors_origin);
     printf("Data directory: %s\n", config.data_directory);
     printf("Temporary directory: %s\n", config.temporary_directory);
     printf("Encryption at rest: %s\n", encryption_is_active() ? "enabled" : "disabled");
+    printf("TLS: %s\n", config.tls_enabled ? "enabled" : "disabled");
     printf("  POST  /auth/register      register a new user\n");
     printf("  POST  /auth/login          authenticate and get a token\n");
     printf("  POST  /auth/logout         invalidate a token\n");

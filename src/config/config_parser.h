@@ -14,14 +14,17 @@ typedef struct
 
 typedef struct
 {
-    unsigned int port;
-    char         cors_origin[4096];
-    char         data_directory[4096];
-    char         temporary_directory[4096];
-    char         master_key[128];
-    int          rate_limit_enabled;
+    unsigned int    port;
+    char            cors_origin[4096];
+    char            data_directory[4096];
+    char            temporary_directory[4096];
+    char            master_key[128];
+    int             rate_limit_enabled;
     RateLimitConfig rate_limit_api;
     RateLimitConfig rate_limit_auth;
+    int             tls_enabled;
+    char            tls_cert_path[4096];
+    char            tls_key_path[4096];
 } CliConfig;
 
 int cli_setup_parse(int argc, char* const argv[], CliConfig* config);

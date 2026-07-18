@@ -5,6 +5,7 @@
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
+#include <sys/stat.h>
 #include <unistd.h>
 
 #include "cJSON.h"
@@ -96,7 +97,7 @@ int cli_setup_read_config(FILE* input, CliConfig* config)
     const char* temp_keys[] = {"temporary_directory", "temporary_dir", "temp_directory", "temp_dir",
                                "temporaryDirectory",  "tempDirectory"};
     const char* cors_keys[] = {"cors_origin", "corsOrigin"};
-    const char* key_keys[] = {"master_key", "masterKey"};
+    const char* key_keys[]  = {"master_key", "masterKey"};
     char*       json        = NULL;
     size_t      i;
 
@@ -175,13 +176,43 @@ int cli_setup_read_config(FILE* input, CliConfig* config)
             if (cJSON_IsBool(enabled))
                 config->rate_limit_enabled = cJSON_IsTrue(enabled);
 
-            config->rate_limit_api.bucket_count     = 1024;
-            config->rate_limit_auth.bucket_count    = 256;
+            config->rate_limit_api.bucket_count  = 1024;
+            config->rate_limit_auth.bucket_count = 256;
 
             parse_rate_limit_zone(cJSON_GetObjectItemCaseSensitive(rl, "api"),
                                   &config->rate_limit_api);
             parse_rate_limit_zone(cJSON_GetObjectItemCaseSensitive(rl, "auth"),
                                   &config->rate_limit_auth);
+        }
+    }
+
+    /* tls */
+    {
+        cJSON* tls = cJSON_GetObjectItemCaseSensitive(root, "tls");
+        if (cJSON_IsObject(tls)) {
+            cJSON* enabled = cJSON_GetObjectItemCaseSensitive(tls, "enabled");
+            if (cJSON_IsBool(enabled))
+                config->tls_enabled = cJSON_IsTrue(enabled);
+
+            const char* cert_keys[] = {"certificate", "cert"};
+            for (i = 0; i < sizeof(cert_keys) / sizeof(cert_keys[0]); i++) {
+                cJSON* item = cJSON_GetObjectItemCaseSensitive(tls, cert_keys[i]);
+                if (cJSON_IsString(item) && item->valuestring) {
+                    snprintf(config->tls_cert_path, sizeof(config->tls_cert_path), "%s",
+                             item->valuestring);
+                    break;
+                }
+            }
+
+            const char* key_keys[] = {"key"};
+            for (i = 0; i < sizeof(key_keys) / sizeof(key_keys[0]); i++) {
+                cJSON* item = cJSON_GetObjectItemCaseSensitive(tls, key_keys[i]);
+                if (cJSON_IsString(item) && item->valuestring) {
+                    snprintf(config->tls_key_path, sizeof(config->tls_key_path), "%s",
+                             item->valuestring);
+                    break;
+                }
+            }
         }
     }
 
@@ -205,10 +236,15 @@ int cli_setup_parse(int argc, char* const argv[], CliConfig* config)
     snprintf(config->data_directory, sizeof(config->data_directory), "%s", DEFAULT_DATA_DIRECTORY);
     snprintf(config->temporary_directory, sizeof(config->temporary_directory), "%s",
              DEFAULT_TEMP_DIRECTORY);
-    config->master_key[0] = '\0';
+    config->master_key[0]      = '\0';
     config->rate_limit_enabled = 0;
-    config->rate_limit_api  = (RateLimitConfig){.capacity = 100, .refill_rate = 10, .refill_interval_ms = 1000, .bucket_count = 1024};
-    config->rate_limit_auth = (RateLimitConfig){.capacity = 5, .refill_rate = 1, .refill_interval_ms = 1000, .bucket_count = 256};
+    config->rate_limit_api     = (RateLimitConfig){
+        .capacity = 100, .refill_rate = 10, .refill_interval_ms = 1000, .bucket_count = 1024};
+    config->rate_limit_auth = (RateLimitConfig){
+        .capacity = 5, .refill_rate = 1, .refill_interval_ms = 1000, .bucket_count = 256};
+    config->tls_enabled      = 0;
+    config->tls_cert_path[0] = '\0';
+    config->tls_key_path[0]  = '\0';
 
     for (i = 1; i < argc; ++i) {
         if (strncmp(argv[i], "--config=", 9) == 0) {
@@ -246,6 +282,31 @@ int cli_setup_parse(int argc, char* const argv[], CliConfig* config)
             fprintf(stderr, "Invalid port in config (must be 1-65535): %u\n", config->port);
             fclose(config_file);
             return 1;
+        }
+
+        if (config->tls_enabled) {
+            if (config->tls_cert_path[0] == '\0') {
+                fprintf(stderr, "TLS is enabled but no certificate path is configured\n");
+                fclose(config_file);
+                return 1;
+            }
+            if (config->tls_key_path[0] == '\0') {
+                fprintf(stderr, "TLS is enabled but no key path is configured\n");
+                fclose(config_file);
+                return 1;
+            }
+
+            struct stat st;
+            if (stat(config->tls_cert_path, &st) != 0 || !S_ISREG(st.st_mode)) {
+                fprintf(stderr, "TLS certificate file not found: %s\n", config->tls_cert_path);
+                fclose(config_file);
+                return 1;
+            }
+            if (stat(config->tls_key_path, &st) != 0 || !S_ISREG(st.st_mode)) {
+                fprintf(stderr, "TLS key file not found: %s\n", config->tls_key_path);
+                fclose(config_file);
+                return 1;
+            }
         }
 
         fclose(config_file);
