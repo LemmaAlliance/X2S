@@ -4,6 +4,16 @@ A lightweight, RESTful blob storage server written in C11. Upload and retrieve b
 
 ## Quick start
 
+### Docker (recommended)
+
+Pre-built container images are available via the [X2S-Docker](https://github.com/LemmaAlliance/X2S-Docker) repo:
+
+```bash
+docker compose up
+```
+
+### Manual build
+
 ```bash
 # install dependencies (Debian/Ubuntu)
 sudo apt update && sudo apt install build-essential cmake libmicrohttpd-dev libssl-dev
