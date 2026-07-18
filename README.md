@@ -34,6 +34,7 @@ Encryption at rest: disabled
   GET   /objects             list owned objects
   GET   /objects/<id>        retrieve an object
   DELETE /objects/<id>       remove an object
+  GET   /health               health check endpoint
   POST  /objects/<id>/share  share an object with another user
 Press Ctrl-C to stop.
 ```
@@ -61,6 +62,15 @@ curl -X POST http://localhost:8080/auth/logout \
 ```
 
 Passwords are hashed with **PBKDF2-HMAC-SHA256** (400,000 iterations, random 16-byte salt, max 1024 bytes). The server stores only the salted hash — never the plaintext password. Password hashes and session tokens are compared using **constant-time** (`CRYPTO_memcmp`) to prevent timing side-channel attacks.
+
+### Health check
+
+```bash
+curl http://localhost:8080/health
+# → {"status":"ok","uptime_seconds":42}
+```
+
+Returns `200` with server uptime. No authentication required. Non-GET requests receive `405 Method Not Allowed`.
 
 ### Object operations
 
