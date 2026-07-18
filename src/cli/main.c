@@ -1,6 +1,8 @@
 #include "server/api_server.h"
 #include "server/rate_limiter.h"
 #include "auth/auth.h"
+#include "auth/token.h"
+#include "auth/refresh_token.h"
 #include "config/config_parser.h"
 #include "storage/object_repository.h"
 #include "core/hex_utils.h"
@@ -10,6 +12,7 @@
 #include <stdio.h>
 #include <stdlib.h>
 #include <sys/stat.h>
+#include <string.h>
 #include <unistd.h>
 
 /* Sleep duration in microseconds (100000 us = 100 ms) */
@@ -64,15 +67,36 @@ int main(int argc, char* argv[])
         return 1;
     }
 
-    SessionStore* sessions = session_store_create(16);
-    if (!sessions) {
-        fprintf(stderr, "Failed to create session store\n");
+    unsigned char hmac_key[HMAC_KEY_SIZE];
+    if (!generate_hmac_key(hmac_key)) {
+        fprintf(stderr, "Failed to generate HMAC key\n");
         user_store_free(users);
         free_store(store);
         return 1;
     }
 
-    TokenStore tokens = {.users = users, .sessions = sessions};
+    RefreshTokenStore* refresh_tokens = refresh_token_store_create(16);
+    if (!refresh_tokens) {
+        fprintf(stderr, "Failed to create refresh token store\n");
+        user_store_free(users);
+        free_store(store);
+        return 1;
+    }
+
+    RevocationStore* revoked_access = revocation_store_create(16);
+    if (!revoked_access) {
+        fprintf(stderr, "Failed to create revocation store\n");
+        refresh_token_store_free(refresh_tokens);
+        user_store_free(users);
+        free_store(store);
+        return 1;
+    }
+
+    refresh_token_store_load(refresh_tokens, store->store_path);
+
+    TokenStore tokens = {.users = users, .refresh_tokens = refresh_tokens,
+                         .revoked_access = revoked_access};
+    memcpy(tokens.hmac_key, hmac_key, HMAC_KEY_SIZE);
 
     RateLimitConfig* api_rate  = config.rate_limit_enabled ? &config.rate_limit_api : NULL;
     RateLimitConfig* auth_rate = config.rate_limit_enabled ? &config.rate_limit_auth : NULL;
@@ -82,7 +106,8 @@ int main(int argc, char* argv[])
                          auth_rate, config.tls_enabled, config.tls_cert_path, config.tls_key_path);
     if (!api) {
         fprintf(stderr, "Failed to start API server on port %u\n", port);
-        session_store_free(sessions);
+        refresh_token_store_free(refresh_tokens);
+        revocation_store_destroy(revoked_access);
         user_store_free(users);
         free_store(store);
         return 1;
@@ -96,7 +121,8 @@ int main(int argc, char* argv[])
     printf("TLS: %s\n", config.tls_enabled ? "enabled" : "disabled");
     printf("  POST  /auth/register      register a new user\n");
     printf("  POST  /auth/login          authenticate and get a token\n");
-    printf("  POST  /auth/logout         invalidate a token\n");
+    printf("  POST  /auth/refresh        refresh an expired token\n");
+    printf("  POST  /auth/logout         invalidate tokens\n");
     printf("  POST  /objects             upload an object\n");
     printf("  GET   /objects             list owned objects\n");
     printf("  GET   /objects/<id>        retrieve an object\n");
@@ -107,7 +133,8 @@ int main(int argc, char* argv[])
     signal(SIGINT, handle_sigint);
     while (running) {
         usleep(MAIN_SLEEP_US);
-        check_token_expiry(sessions);
+        revocation_store_cleanup(revoked_access);
+        refresh_token_cleanup(refresh_tokens);
         if (api->api_limiter)
             rate_limiter_cleanup(api->api_limiter);
         if (api->auth_limiter)
@@ -117,7 +144,9 @@ int main(int argc, char* argv[])
     printf("\nShutting down...\n");
     api_server_stop(api);
     user_store_save(users, store->store_path);
-    session_store_free(sessions);
+    refresh_token_store_save(refresh_tokens, store->store_path);
+    refresh_token_store_free(refresh_tokens);
+    revocation_store_destroy(revoked_access);
     user_store_free(users);
     free_store(store);
     return 0;

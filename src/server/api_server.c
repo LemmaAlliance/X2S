@@ -1,6 +1,8 @@
 #define _POSIX_C_SOURCE 200809L /* for strcasecmp */
 #include "api_server.h"
 #include "auth/auth.h"
+#include "auth/token.h"
+#include "auth/refresh_token.h"
 #include "core/hex_utils.h"
 #include "storage/object_repository.h"
 #include "core/object_types.h"
@@ -586,23 +588,38 @@ static enum MHD_Result build_auth_response(struct MHD_Connection* conn, ApiServe
                                            const unsigned char user_id[USER_ID_SIZE],
                                            unsigned int        status)
 {
-    char* token_hex = session_create(server->tokens->sessions, user_id);
-    if (!token_hex)
+    time_t expiry   = time(NULL) + ACCESS_TOKEN_EXPIRY_SECONDS;
+    char*  access_token =
+        access_token_create(server->tokens->hmac_key, user_id, expiry);
+    if (!access_token)
         return send_error_cors(conn, server->cors_origin, MHD_HTTP_INTERNAL_SERVER_ERROR,
-                               "failed to create session");
+                               "failed to create access token");
+
+    char* refresh_token =
+        refresh_token_create(server->tokens->refresh_tokens, user_id);
+    if (!refresh_token) {
+        free(access_token);
+        return send_error_cors(conn, server->cors_origin, MHD_HTTP_INTERNAL_SERVER_ERROR,
+                               "failed to create refresh token");
+    }
 
     char user_id_hex[USER_ID_SIZE * 2 + 1] = {0};
     bytes_to_hex(user_id, USER_ID_SIZE, user_id_hex);
 
-    size_t json_len = strlen(token_hex) + strlen(user_id_hex) + 40;
-    char*  json     = malloc(json_len + 1);
+    size_t json_len = strlen(access_token) + strlen(refresh_token) +
+                      strlen(user_id_hex) + 80;
+    char* json = malloc(json_len + 1);
     if (!json) {
-        free(token_hex);
+        free(access_token);
+        free(refresh_token);
         return MHD_NO;
     }
 
-    snprintf(json, json_len + 1, "{\"token\":\"%s\",\"user_id\":\"%s\"}", token_hex, user_id_hex);
-    free(token_hex);
+    snprintf(json, json_len + 1,
+             "{\"token\":\"%s\",\"refresh_token\":\"%s\",\"user_id\":\"%s\"}",
+             access_token, refresh_token, user_id_hex);
+    free(access_token);
+    free(refresh_token);
 
     struct MHD_Response* resp =
         MHD_create_response_from_buffer(strlen(json), json, MHD_RESPMEM_MUST_FREE);
@@ -726,22 +743,49 @@ static enum MHD_Result handle_auth_login(struct MHD_Connection* conn, ApiServer*
                               MHD_HTTP_UNAUTHORIZED, MHD_HTTP_OK);
 }
 
-static enum MHD_Result handle_auth_logout(struct MHD_Connection* conn, ApiServer* server)
+static enum MHD_Result handle_auth_logout(struct MHD_Connection* conn, ApiServer* server,
+                                          const char* upload_data, size_t* upload_data_size,
+                                          void** con_cls)
 {
+    if (!*con_cls) {
+        UploadBuffer* ub = calloc(1, sizeof(UploadBuffer));
+        if (!ub)
+            return MHD_NO;
+        ub->type = BUFFER_TYPE_UPLOAD;
+        *con_cls = ub;
+        return MHD_YES;
+    }
+
+    UploadBuffer* ub = *con_cls;
+
+    if (*upload_data_size > 0) {
+        enum MHD_Result ret = upload_buffer_accumulate(ub, upload_data, *upload_data_size, 4096,
+                                                        conn, server->cors_origin);
+        if (ret != MHD_YES)
+            return ret;
+        *upload_data_size = 0;
+        return MHD_YES;
+    }
+
     const char* auth = MHD_lookup_connection_value(conn, MHD_HEADER_KIND, "Authorization");
     if (!auth || strncmp(auth, "Bearer ", 7) != 0)
         return send_error_cors(conn, server->cors_origin, MHD_HTTP_UNAUTHORIZED,
                                "missing bearer token");
 
-    const char* hex_token = auth + 7;
-    if (strlen(hex_token) != TOKEN_SIZE * 2)
+    const char* access_token = auth + 7;
+    if (strlen(access_token) == 0)
         return send_error_cors(conn, server->cors_origin, MHD_HTTP_UNAUTHORIZED, "invalid token");
 
-    unsigned char token_bin[TOKEN_SIZE];
-    if (!hex_to_bytes(hex_token, token_bin, TOKEN_SIZE))
-        return send_error_cors(conn, server->cors_origin, MHD_HTTP_UNAUTHORIZED, "invalid token");
+    revocation_store_revoke(server->tokens->revoked_access, access_token);
 
-    session_destroy(server->tokens->sessions, token_bin);
+    if (ub->len > 0) {
+        char refresh_token_hex[REFRESH_TOKEN_SIZE * 2 + 1] = {0};
+        if (parse_form_field(ub->buf, "refresh_token", refresh_token_hex,
+                             sizeof(refresh_token_hex)) &&
+            strlen(refresh_token_hex) > 0) {
+            refresh_token_revoke(server->tokens->refresh_tokens, refresh_token_hex);
+        }
+    }
 
     struct MHD_Response* resp = MHD_create_response_from_buffer(0, NULL, MHD_RESPMEM_PERSISTENT);
     if (!resp)
@@ -749,6 +793,90 @@ static enum MHD_Result handle_auth_logout(struct MHD_Connection* conn, ApiServer
 
     add_cors_headers(resp, server->cors_origin);
     enum MHD_Result ret = MHD_queue_response(conn, MHD_HTTP_NO_CONTENT, resp);
+    MHD_destroy_response(resp);
+    return ret;
+}
+
+static enum MHD_Result handle_auth_refresh(struct MHD_Connection* conn, ApiServer* server,
+                                           const char* upload_data, size_t* upload_data_size,
+                                           void** con_cls)
+{
+    if (!*con_cls) {
+        UploadBuffer* ub = calloc(1, sizeof(UploadBuffer));
+        if (!ub)
+            return MHD_NO;
+        ub->type = BUFFER_TYPE_UPLOAD;
+        *con_cls = ub;
+        return MHD_YES;
+    }
+
+    UploadBuffer* ub = *con_cls;
+
+    if (*upload_data_size > 0) {
+        enum MHD_Result ret = upload_buffer_accumulate(ub, upload_data, *upload_data_size, 4096,
+                                                        conn, server->cors_origin);
+        if (ret != MHD_YES)
+            return ret;
+        *upload_data_size = 0;
+        return MHD_YES;
+    }
+
+    if (ub->len == 0)
+        return send_error_cors(conn, server->cors_origin, MHD_HTTP_BAD_REQUEST, "empty body");
+
+    char refresh_token_hex[REFRESH_TOKEN_SIZE * 2 + 1] = {0};
+    if (!parse_form_field(ub->buf, "refresh_token", refresh_token_hex,
+                          sizeof(refresh_token_hex)) ||
+        strlen(refresh_token_hex) == 0) {
+        return send_error_cors(conn, server->cors_origin, MHD_HTTP_BAD_REQUEST,
+                               "missing refresh_token");
+    }
+
+    unsigned char user_id[USER_ID_SIZE];
+    char* new_access_token = NULL;
+    char* new_refresh_token =
+        refresh_token_rotate(server->tokens->refresh_tokens, refresh_token_hex, user_id);
+
+    if (!new_refresh_token)
+        return send_error_cors(conn, server->cors_origin, MHD_HTTP_UNAUTHORIZED,
+                               "invalid or expired refresh token");
+
+    time_t expiry = time(NULL) + ACCESS_TOKEN_EXPIRY_SECONDS;
+    new_access_token = access_token_create(server->tokens->hmac_key, user_id, expiry);
+    if (!new_access_token) {
+        free(new_refresh_token);
+        return send_error_cors(conn, server->cors_origin, MHD_HTTP_INTERNAL_SERVER_ERROR,
+                               "failed to create access token");
+    }
+
+    char user_id_hex[USER_ID_SIZE * 2 + 1] = {0};
+    bytes_to_hex(user_id, USER_ID_SIZE, user_id_hex);
+
+    size_t json_len = strlen(new_access_token) + strlen(new_refresh_token) +
+                      strlen(user_id_hex) + 80;
+    char* json = malloc(json_len + 1);
+    if (!json) {
+        free(new_access_token);
+        free(new_refresh_token);
+        return MHD_NO;
+    }
+
+    snprintf(json, json_len + 1,
+             "{\"token\":\"%s\",\"refresh_token\":\"%s\",\"user_id\":\"%s\"}",
+             new_access_token, new_refresh_token, user_id_hex);
+    free(new_access_token);
+    free(new_refresh_token);
+
+    struct MHD_Response* resp =
+        MHD_create_response_from_buffer(strlen(json), json, MHD_RESPMEM_MUST_FREE);
+    if (!resp) {
+        free(json);
+        return MHD_NO;
+    }
+
+    MHD_add_response_header(resp, "Content-Type", "application/json");
+    add_cors_headers(resp, server->cors_origin);
+    enum MHD_Result ret = MHD_queue_response(conn, MHD_HTTP_OK, resp);
     MHD_destroy_response(resp);
     return ret;
 }
@@ -911,9 +1039,16 @@ static enum MHD_Result access_handler(void* cls, struct MHD_Connection* conn, co
                                "only POST is accepted on /auth/login");
     }
 
+    if (strcmp(url, "/auth/refresh") == 0) {
+        if (strcmp(method, "POST") == 0)
+            return handle_auth_refresh(conn, server, upload_data, upload_data_size, con_cls);
+        return send_error_cors(conn, server->cors_origin, MHD_HTTP_METHOD_NOT_ALLOWED,
+                               "only POST is accepted on /auth/refresh");
+    }
+
     if (strcmp(url, "/auth/logout") == 0) {
         if (strcmp(method, "POST") == 0)
-            return handle_auth_logout(conn, server);
+            return handle_auth_logout(conn, server, upload_data, upload_data_size, con_cls);
         return send_error_cors(conn, server->cors_origin, MHD_HTTP_METHOD_NOT_ALLOWED,
                                "only POST is accepted on /auth/logout");
     }

@@ -8,13 +8,11 @@
 #include "auth/auth.h"
 #include "core/format.h"
 #include "core/format_registry.h"
-#include "core/hex_utils.h"
 #include "crypto/encryption.h"
 #include "storage/object_io.h"
 
 #define PBKDF2_ITERATIONS 400000
 #define PATH_MAX_LEN 4096
-#define TOKEN_EXPIRY_SECONDS 1800 /* 30 min token expiry */
 
 void hash_password(const char* password, const unsigned char salt[SALT_SIZE],
                    unsigned char out[HASH_SIZE])
@@ -206,122 +204,3 @@ int user_store_load(UserStore* store, const char* path)
     return ret;
 }
 
-SessionStore* session_store_create(size_t initial_capacity)
-{
-    SessionStore* store = malloc(sizeof(SessionStore));
-    if (!store)
-        return NULL;
-
-    store->capacity = (initial_capacity < 16) ? 16 : initial_capacity;
-    store->count    = 0;
-    store->sessions = calloc(store->capacity, sizeof(Session));
-    if (!store->sessions) {
-        free(store);
-        return NULL;
-    }
-
-    return store;
-}
-
-void session_store_free(SessionStore* store)
-{
-    if (!store)
-        return;
-    free(store->sessions);
-    free(store);
-}
-
-static int session_store_grow(SessionStore* store)
-{
-    size_t   new_cap = store->capacity * 2;
-    Session* tmp     = realloc(store->sessions, new_cap * sizeof(Session));
-    if (!tmp)
-        return 0;
-    memset(tmp + store->capacity, 0, (new_cap - store->capacity) * sizeof(Session));
-    store->sessions = tmp;
-    store->capacity = new_cap;
-    return 1;
-}
-
-char* session_create(SessionStore* store, const unsigned char user_id[16])
-{
-    if (!store || !user_id)
-        return NULL;
-
-    if (store->count == store->capacity) {
-        if (!session_store_grow(store))
-            return NULL;
-    }
-
-    Session* s = &store->sessions[store->count];
-
-    if (!generate_random(s->token, TOKEN_SIZE))
-        return NULL;
-    memcpy(s->user_id, user_id, 16);
-
-    char* hex = malloc(TOKEN_SIZE * 2 + 1);
-    if (!hex)
-        return NULL;
-    bytes_to_hex(s->token, TOKEN_SIZE, hex);
-
-    time_t now = time(NULL);
-    s->expiry  = now + TOKEN_EXPIRY_SECONDS;
-    store->count++;
-    return hex;
-}
-
-int session_lookup(SessionStore* store, const unsigned char token[TOKEN_SIZE],
-                   unsigned char user_id_out[16])
-{
-    if (!store || !token)
-        return 0;
-
-    for (size_t i = 0; i < store->count; i++) {
-        if (CRYPTO_memcmp(store->sessions[i].token, token, TOKEN_SIZE) == 0) {
-            memcpy(user_id_out, store->sessions[i].user_id, 16);
-            return 1;
-        }
-    }
-
-    return 0;
-}
-
-void session_destroy(SessionStore* store, const unsigned char token[TOKEN_SIZE])
-{
-    if (!store || !token)
-        return;
-
-    for (size_t i = 0; i < store->count; i++) {
-        if (CRYPTO_memcmp(store->sessions[i].token, token, TOKEN_SIZE) == 0) {
-            if (i < store->count - 1) {
-                memmove(&store->sessions[i], &store->sessions[i + 1],
-                        (store->count - i - 1) * sizeof(Session));
-            }
-            store->count--;
-            return;
-        }
-    }
-}
-
-void check_token_expiry(SessionStore* store)
-{
-    if (!store || store->count == 0)
-        return;
-
-    time_t now         = time(NULL);
-    size_t write_index = 0;
-
-    for (size_t read_index = 0; read_index < store->count; read_index++) {
-        if (store->sessions[read_index].expiry > now) {
-            if (write_index != read_index) {
-                store->sessions[write_index] = store->sessions[read_index];
-            }
-            write_index++;
-        } else {
-            // Clear memory of expired token for safety
-            memset(&store->sessions[read_index], 0, sizeof(Session));
-        }
-    }
-
-    store->count = write_index;
-}
